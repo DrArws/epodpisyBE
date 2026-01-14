@@ -478,6 +478,7 @@ class OTPStatus(str, Enum):
     REQUIRED = "required"          # OTP required but not sent yet
     SENT = "sent"                  # OTP sent, waiting for verification
     VERIFIED = "verified"          # OTP verified successfully
+    LOCKED = "locked"              # Too many failed attempts, temporarily locked
 
 
 class SignerHint(BaseModel):

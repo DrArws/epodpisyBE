@@ -73,8 +73,14 @@ def compute_otp_status(
     otp_channel: Optional[str],
     otp_verified_at: Optional[str],
     verification_method: Optional[str] = None,
+    otp_locked_until: Optional[str] = None,
 ) -> OTPStatus:
     """Determine OTP status from session state."""
+    # Check if account is locked due to too many failed attempts
+    if otp_locked_until:
+        locked = parse_db_timestamp(otp_locked_until)
+        if locked and locked > utc_now():
+            return OTPStatus.LOCKED
     # If verification_method is explicitly "none", OTP is not required
     if verification_method == "none":
         return OTPStatus.NOT_REQUIRED
@@ -185,6 +191,7 @@ async def get_signing_session(
             otp_channel=session_data.get("otp_channel") if session_data else None,
             otp_verified_at=session_data.get("otp_verified_at") if session_data else None,
             verification_method=session.verification_method,
+            otp_locked_until=session_data.get("otp_locked_until") if session_data else None,
         )
 
         # Build sign fields from placement defaults or document config
