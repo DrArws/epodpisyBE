@@ -240,6 +240,9 @@ async def process_and_finalize_signature(
                 "tsa_fallback_url": pades_audit.tsa_fallback_url,
                 "tsa_fallback_used": pades_audit.tsa_fallback_used,
                 "tsa_qualified": pades_audit.tsa_qualified,
+                "tsa_applied": pades_audit.tsa_applied,
+                "tsa_error_type": pades_audit.tsa_error_type,
+                "tsa_error_message": pades_audit.tsa_error_message,
                 "document_hash_before": pades_audit.document_sha256_before,
                 "document_hash_after": pades_audit.document_sha256_after,
                 # Validation results
@@ -257,6 +260,7 @@ async def process_and_finalize_signature(
                 "tsa_attempts": pades_audit.tsa_attempts,
                 "signature_bytes": pades_audit.signature_bytes,
                 "errors": pades_audit.errors,
+                "warnings": pades_audit.warnings,
             }
         await supabase.update_signing_session(session_id=session.id, updates=session_updates)
 

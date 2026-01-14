@@ -13,7 +13,6 @@ import eu.europa.esig.dss.model.x509.CertificateToken;
 import eu.europa.esig.dss.pades.PAdESSignatureParameters;
 import eu.europa.esig.dss.pades.signature.PAdESService;
 import eu.europa.esig.dss.pades.validation.PDFDocumentValidator;
-import eu.europa.esig.dss.service.tsp.OnlineTSPSource;
 import eu.europa.esig.dss.simplereport.SimpleReport;
 import eu.europa.esig.dss.validation.CommonCertificateVerifier;
 import eu.europa.esig.dss.validation.SignedDocumentValidator;
@@ -47,14 +46,22 @@ import java.util.HexFormat;
  *   TSA_CONNECT_TIMEOUT_MS - TSA connection timeout in ms (default: 5000)
  *   TSA_READ_TIMEOUT_MS   - TSA read timeout in ms (default: 15000)
  *   TSA_MAX_RETRIES       - Max retries per TSA (default: 2)
+ *   TSA_FAIL_OPEN         - If "true", fallback to BASELINE-B when TSA unavailable (default: false)
  *
  * Exit codes:
  *   0 - Success
  *   1 - Usage error (wrong arguments)
  *   2 - Config error (KMS_KEY_NAME parse, missing env)
  *   3 - KMS error (permission denied, key not found)
- *   4 - TSA/network error (timestamp server unavailable)
+ *   4 - TSA/network error (timestamp server unavailable) - only if TSA_FAIL_OPEN=false
  *   5 - PDF error (file not found, parse/write error)
+ *
+ * TSA Error Types (canonical codes for FE):
+ *   TSA_UNAVAILABLE      - Network/timeout/refused (HTTP 503)
+ *   TSA_RATE_LIMITED     - HTTP 429 (HTTP 429)
+ *   TSA_INVALID_RESPONSE - Parse/token error (HTTP 502)
+ *   TSA_TLS_ERROR        - TLS/certificate error (HTTP 502)
+ *   TSA_CLIENT_ERROR     - HTTP 400/401/403 (HTTP 400)
  */
 public class Main {
 
@@ -88,6 +95,7 @@ public class Main {
     private static int TSA_CONNECT_TIMEOUT_MS;
     private static int TSA_READ_TIMEOUT_MS;
     private static int TSA_MAX_RETRIES;
+    private static boolean TSA_FAIL_OPEN;  // Fallback to BASELINE-B if TSA fails
 
     // Config error holder for deferred exit (static init can't call System.exit)
     private static String CONFIG_ERROR = null;
@@ -143,8 +151,11 @@ public class Main {
         TSA_READ_TIMEOUT_MS = getEnvOrDefaultInt("TSA_READ_TIMEOUT_MS", DEFAULT_TSA_READ_TIMEOUT_MS);
         TSA_MAX_RETRIES = getEnvOrDefaultInt("TSA_MAX_RETRIES", DEFAULT_TSA_MAX_RETRIES);
 
+        TSA_FAIL_OPEN = "true".equalsIgnoreCase(getEnvOrDefault("TSA_FAIL_OPEN", "false"));
+
         LOG.info("TSA primary: {} (timeout: {}ms connect, {}ms read)", TSA_URL, TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS);
         LOG.info("TSA fallback: {}", TSA_FALLBACK_URL);
+        LOG.info("TSA fail-open mode: {} (fallback to BASELINE-B if TSA unavailable)", TSA_FAIL_OPEN);
 
         if (TSA_URL.startsWith("http://")) {
             LOG.warn("TSA_URL uses HTTP instead of HTTPS - consider using HTTPS for security");
@@ -295,8 +306,27 @@ public class Main {
     }
 
     private static class TsaException extends Exception {
+        private final FallbackTSPSource.TsaErrorType errorType;
+        private final int httpStatus;
+
         public TsaException(String message, Throwable cause) {
             super(message, cause);
+            this.errorType = FallbackTSPSource.TsaErrorType.TSA_UNAVAILABLE;
+            this.httpStatus = 503;
+        }
+
+        public TsaException(String message, FallbackTSPSource.TsaErrorType errorType, int httpStatus, Throwable cause) {
+            super(message, cause);
+            this.errorType = errorType;
+            this.httpStatus = httpStatus;
+        }
+
+        public FallbackTSPSource.TsaErrorType getErrorType() {
+            return errorType;
+        }
+
+        public int getHttpStatus() {
+            return httpStatus;
         }
     }
 
@@ -319,9 +349,9 @@ public class Main {
             audit.setCertificateFingerprint(computeCertFingerprint(signingCert));
             LOG.info("KMS_INIT_OK: Certificate loaded successfully");
 
-            // Configure PAdES parameters
+            // Configure PAdES parameters - start with BASELINE-T (with timestamp)
             PAdESSignatureParameters parameters = new PAdESSignatureParameters();
-            parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_T); // PAdES-T with timestamp
+            parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_T);
             parameters.setDigestAlgorithm(DigestAlgorithm.SHA256);
             parameters.setSigningCertificate(signingCert);
             parameters.setCertificateChain(privateKey.getCertificateChain());
@@ -337,15 +367,18 @@ public class Main {
             parameters.setLocation("Czech Republic");
             parameters.setContactInfo("podpisy@drbacon.cz");
 
-            audit.setSignatureProfile("PAdES-BASELINE-T");
-
             // Create certificate verifier (allows self-signed for now)
             CommonCertificateVerifier certificateVerifier = new CommonCertificateVerifier();
 
             // Create PAdES service
             PAdESService service = new PAdESService(certificateVerifier);
 
-            // TSP source will be set in signDocumentWithTsaRetry for each attempt
+            // Create FallbackTSPSource with proper timeouts
+            FallbackTSPSource tspSource = new FallbackTSPSource(
+                TSA_URL, TSA_FALLBACK_URL,
+                TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS, TSA_MAX_RETRIES
+            );
+            service.setTspSource(tspSource);
 
             // Load input document
             DSSDocument toSignDocument = new FileDocument(inputPath);
@@ -365,24 +398,89 @@ public class Main {
             audit.setKmsLatencyMs(kmsTime);
             audit.setSignatureBytes(signatureValue.getValue().length);
 
-            // Embed signature and timestamp with retry
+            // Embed signature with timestamp
             LOG.info("Requesting timestamp from TSA...");
-            DSSDocument signedDocument = signDocumentWithTsaRetry(
-                service, toSignDocument, parameters, signatureValue, audit
-            );
+            DSSDocument signedDocument;
+            boolean tsaApplied = true;
+            String signatureProfile = "PAdES-BASELINE-T";
+
+            try {
+                signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
+
+                // Record TSA metrics from FallbackTSPSource
+                audit.setTsaUrlUsed(tspSource.getUrlUsed());
+                audit.setTsaFallbackUsed(tspSource.isFallbackUsed());
+                audit.setTsaQualified(tspSource.isQualified());
+                audit.setTsaLatencyMs(tspSource.getTotalLatencyMs());
+                audit.setTsaAttempts(tspSource.getTotalAttempts());
+                audit.setTsaTokenTime(Instant.now());
+
+                LOG.info("TSA_OK: Timestamp applied from {} (qualified: {}, fallback: {})",
+                    tspSource.getUrlUsed(), tspSource.isQualified(), tspSource.isFallbackUsed());
+
+            } catch (FallbackTSPSource.TsaException e) {
+                // TSA failed - check if fail-open mode is enabled
+                LOG.error("TSA_FAILED: {} (error type: {})", e.getMessage(), e.getErrorType());
+
+                // Record TSA failure metrics
+                audit.setTsaLatencyMs(tspSource.getTotalLatencyMs());
+                audit.setTsaAttempts(tspSource.getTotalAttempts());
+                audit.setTsaErrorType(e.getErrorType().name());
+                audit.setTsaErrorMessage(tspSource.getLastErrorMessage());
+
+                if (TSA_FAIL_OPEN) {
+                    // Fail-open: fallback to BASELINE-B (no timestamp)
+                    LOG.warn("TSA_FAIL_OPEN: Falling back to BASELINE-B (no timestamp)");
+
+                    parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_B);
+                    signatureProfile = "PAdES-BASELINE-B";
+                    tsaApplied = false;
+
+                    // Re-compute data to sign with new parameters
+                    dataToSign = service.getDataToSign(toSignDocument, parameters);
+
+                    // Re-sign with KMS
+                    signatureValue = token.sign(dataToSign, DigestAlgorithm.SHA256, privateKey);
+
+                    // Sign without TSP source
+                    service.setTspSource(null);
+                    signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
+
+                    audit.addWarning("TSA_UNAVAILABLE_FALLBACK_TO_B");
+                    LOG.warn("Signed with BASELINE-B due to TSA unavailability");
+
+                } else {
+                    // Fail-closed: throw error
+                    throw new TsaException(
+                        "TSA request failed: " + e.getMessage(),
+                        e.getErrorType(),
+                        e.getHttpStatus(),
+                        e
+                    );
+                }
+            }
+
+            // Record final signature profile
+            audit.setSignatureProfile(signatureProfile);
+            audit.setTsaApplied(tsaApplied);
 
             // Save signed document
             LOG.info("Saving signed document to: {}", outputPath);
             try (OutputStream os = new FileOutputStream(outputPath)) {
                 signedDocument.writeTo(os);
             }
-            LOG.info("PDF_WRITE_OK: Document saved successfully");
+            LOG.info("PDF_WRITE_OK: Document saved successfully (profile: {})", signatureProfile);
 
             // Validate the signature integrity (server-side verification)
             LOG.info("Validating signature integrity...");
             validateSignedDocument(outputPath, audit);
 
             LOG.info("Document signed and validated successfully!");
+
+        } catch (TsaException e) {
+            throw e;  // Already properly wrapped
+        } catch (FallbackTSPSource.TsaException e) {
+            throw new TsaException(e.getMessage(), e.getErrorType(), e.getHttpStatus(), e);
         } catch (Exception e) {
             // Wrap exceptions with better classification
             String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
@@ -477,158 +575,6 @@ public class Main {
             audit.setSignatureIntegrityOk(false);
             audit.addError("VALIDATION_ERROR: " + e.getMessage());
         }
-    }
-
-    /**
-     * Sign document with TSA timestamp, with primary/fallback TSA and retry logic.
-     *
-     * Strategy:
-     * 1. Try primary TSA (APED Greece - eIDAS qualified) with configured retries
-     * 2. If primary fails, try fallback TSA (SwissSign) with configured retries
-     * 3. Record which TSA was used and whether fallback was needed
-     */
-    private static DSSDocument signDocumentWithTsaRetry(
-            PAdESService service,
-            DSSDocument toSignDocument,
-            PAdESSignatureParameters parameters,
-            SignatureValue signatureValue,
-            AuditRecord audit) throws Exception {
-
-        // TSA URLs to try: primary first, then fallback
-        String[] tsaUrls = {TSA_URL, TSA_FALLBACK_URL};
-        boolean[] isQualified = {isQualifiedTsa(TSA_URL), isQualifiedTsa(TSA_FALLBACK_URL)};
-
-        Exception lastException = null;
-        long totalLatency = 0;
-        int totalAttempts = 0;
-
-        for (int tsaIndex = 0; tsaIndex < tsaUrls.length; tsaIndex++) {
-            String currentTsaUrl = tsaUrls[tsaIndex];
-            boolean isFallback = (tsaIndex > 0);
-            boolean qualified = isQualified[tsaIndex];
-
-            LOG.info("Trying TSA {}: {} (qualified: {})",
-                isFallback ? "fallback" : "primary", currentTsaUrl, qualified);
-
-            // Configure TSP source with timeouts
-            OnlineTSPSource tspSource = createTspSource(currentTsaUrl);
-            service.setTspSource(tspSource);
-
-            // Try this TSA with retries
-            for (int attempt = 1; attempt <= TSA_MAX_RETRIES; attempt++) {
-                totalAttempts++;
-
-                // Exponential backoff (skip for first attempt of each TSA)
-                if (attempt > 1) {
-                    long backoff = 1000L * (1 << (attempt - 2));  // 1s, 2s, 4s...
-                    LOG.info("TSA retry {}/{} after {}ms backoff...", attempt, TSA_MAX_RETRIES, backoff);
-                    try {
-                        Thread.sleep(backoff);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw new TsaException("TSA retry interrupted", ie);
-                    }
-                }
-
-                long tsaStart = System.currentTimeMillis();
-                try {
-                    DSSDocument signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
-                    long tsaTime = System.currentTimeMillis() - tsaStart;
-                    totalLatency += tsaTime;
-
-                    LOG.info("TSA_OK: Timestamp from {} in {}ms (attempt {}, total attempts: {})",
-                        currentTsaUrl, tsaTime, attempt, totalAttempts);
-
-                    // Record TSA metrics in audit
-                    audit.setTsaUrlUsed(currentTsaUrl);
-                    audit.setTsaFallbackUsed(isFallback);
-                    audit.setTsaQualified(qualified);
-                    audit.setTsaLatencyMs(totalLatency);
-                    audit.setTsaAttempts(totalAttempts);
-                    audit.setTsaTokenTime(Instant.now());
-
-                    return signedDocument;
-
-                } catch (Exception e) {
-                    long tsaTime = System.currentTimeMillis() - tsaStart;
-                    totalLatency += tsaTime;
-                    lastException = e;
-
-                    String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                    LOG.warn("TSA_FAIL: {} attempt {}/{} failed after {}ms: {}",
-                        isFallback ? "Fallback" : "Primary", attempt, TSA_MAX_RETRIES, tsaTime, errorMsg);
-
-                    // Check if this is a retryable error (network/timeout issues)
-                    if (!isRetryableTsaError(e)) {
-                        LOG.error("TSA error is not retryable, trying next TSA");
-                        break;
-                    }
-                }
-            }
-
-            // This TSA failed, try fallback
-            if (!isFallback) {
-                LOG.warn("Primary TSA {} failed, switching to fallback", currentTsaUrl);
-            }
-        }
-
-        // All TSAs exhausted
-        audit.setTsaLatencyMs(totalLatency);
-        audit.setTsaAttempts(totalAttempts);
-        audit.setTsaFallbackUsed(true);
-        String errorMsg = lastException != null ? lastException.getMessage() : "Unknown TSA error";
-        throw new TsaException("All TSA servers failed after " + totalAttempts + " total attempts: " + errorMsg, lastException);
-    }
-
-    /**
-     * Create TSP source with configured timeouts.
-     */
-    private static OnlineTSPSource createTspSource(String tsaUrl) {
-        OnlineTSPSource tspSource = new OnlineTSPSource(tsaUrl);
-        // Note: DSS OnlineTSPSource uses CommonsDataLoader internally
-        // Timeout configuration may need custom DataLoader for full control
-        return tspSource;
-    }
-
-    /**
-     * Check if TSA URL is a known eIDAS qualified TSA.
-     */
-    private static boolean isQualifiedTsa(String tsaUrl) {
-        if (tsaUrl == null) return false;
-        // Known eIDAS qualified TSA URLs
-        return tsaUrl.contains("timestamp.aped.gov.gr") ||  // APED Greece
-               tsaUrl.contains("tsa.swisssign.net") ||      // SwissSign
-               tsaUrl.contains("timestamp.sectigo.com") ||  // Sectigo
-               tsaUrl.contains("freetsa.org");              // FreeTSA (not qualified but free)
-    }
-
-    /**
-     * Determine if a TSA error is worth retrying.
-     * Network timeouts, connection refused, etc. are retryable.
-     * Invalid response format, certificate errors, etc. are not.
-     */
-    private static boolean isRetryableTsaError(Exception e) {
-        String msg = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
-        String className = e.getClass().getSimpleName().toLowerCase();
-
-        // Retryable: network issues
-        if (msg.contains("timeout") || msg.contains("timed out")) return true;
-        if (msg.contains("connection") && (msg.contains("refused") || msg.contains("reset"))) return true;
-        if (msg.contains("unreachable") || msg.contains("no route")) return true;
-        if (msg.contains("temporary") || msg.contains("unavailable")) return true;
-        if (className.contains("timeout") || className.contains("socket")) return true;
-        if (className.contains("connect")) return true;
-
-        // Check cause chain
-        Throwable cause = e.getCause();
-        if (cause != null && cause != e) {
-            if (cause instanceof java.net.SocketTimeoutException) return true;
-            if (cause instanceof java.net.ConnectException) return true;
-            if (cause instanceof java.net.UnknownHostException) return true;
-        }
-
-        // Not retryable: likely a permanent error
-        return false;
     }
 
     private static String computeCertFingerprint(CertificateToken cert) {

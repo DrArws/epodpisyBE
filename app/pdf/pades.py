@@ -49,6 +49,9 @@ class PAdESAuditRecord:
     tsa_fallback_url: Optional[str]
     tsa_fallback_used: Optional[bool]
     tsa_qualified: Optional[bool]
+    tsa_applied: Optional[bool]
+    tsa_error_type: Optional[str]
+    tsa_error_message: Optional[str]
     tsa_token_time: Optional[str]
     signer_display_name: str
     signature_profile: str
@@ -65,6 +68,7 @@ class PAdESAuditRecord:
     validation_sub_indication: Optional[str]
     success: bool
     errors: list
+    warnings: list
 
 
 class PAdESSigningError(Exception):
@@ -254,6 +258,9 @@ class PAdESSigner:
                 tsa_fallback_url=data.get("tsa_fallback_url"),
                 tsa_fallback_used=data.get("tsa_fallback_used"),
                 tsa_qualified=data.get("tsa_qualified"),
+                tsa_applied=data.get("tsa_applied"),
+                tsa_error_type=data.get("tsa_error_type"),
+                tsa_error_message=data.get("tsa_error_message"),
                 tsa_token_time=data.get("tsa_token_time"),
                 signer_display_name=data.get("signer_display_name", ""),
                 signature_profile=data.get("signature_profile", ""),
@@ -270,6 +277,7 @@ class PAdESSigner:
                 validation_sub_indication=data.get("validation_sub_indication"),
                 success=data.get("success", False),
                 errors=data.get("errors", []),
+                warnings=data.get("warnings", []),
             )
         except Exception as e:
             logger.error(f"Failed to parse audit file: {e}")

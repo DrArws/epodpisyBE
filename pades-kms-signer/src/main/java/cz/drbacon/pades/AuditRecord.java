@@ -49,6 +49,15 @@ public class AuditRecord {
     @JsonProperty("tsa_qualified")
     private Boolean tsaQualified;
 
+    @JsonProperty("tsa_applied")
+    private Boolean tsaApplied;
+
+    @JsonProperty("tsa_error_type")
+    private String tsaErrorType;
+
+    @JsonProperty("tsa_error_message")
+    private String tsaErrorMessage;
+
     @JsonProperty("tsa_token_time")
     private Instant tsaTokenTime;
 
@@ -114,6 +123,9 @@ public class AuditRecord {
 
     @JsonProperty("errors")
     private List<String> errors = new ArrayList<>();
+
+    @JsonProperty("warnings")
+    private List<String> warnings = new ArrayList<>();
 
     public AuditRecord() {
         this.sessionId = UUID.randomUUID().toString();
@@ -203,6 +215,30 @@ public class AuditRecord {
 
     public void setTsaQualified(Boolean tsaQualified) {
         this.tsaQualified = tsaQualified;
+    }
+
+    public Boolean getTsaApplied() {
+        return tsaApplied;
+    }
+
+    public void setTsaApplied(Boolean tsaApplied) {
+        this.tsaApplied = tsaApplied;
+    }
+
+    public String getTsaErrorType() {
+        return tsaErrorType;
+    }
+
+    public void setTsaErrorType(String tsaErrorType) {
+        this.tsaErrorType = tsaErrorType;
+    }
+
+    public String getTsaErrorMessage() {
+        return tsaErrorMessage;
+    }
+
+    public void setTsaErrorMessage(String tsaErrorMessage) {
+        this.tsaErrorMessage = tsaErrorMessage;
     }
 
     public Instant getTsaTokenTime() {
@@ -379,6 +415,14 @@ public class AuditRecord {
 
     public void addError(String error) {
         this.errors.add(error);
+    }
+
+    public List<String> getWarnings() {
+        return warnings;
+    }
+
+    public void addWarning(String warning) {
+        this.warnings.add(warning);
     }
 
     /**
