@@ -14,7 +14,6 @@ from app.pdf.sign import SignaturePlacement, SigningError
 from app.utils.security import compute_file_hash
 from app.utils.datetime_utils import utc_now
 from app.models import SigningSession, SignerStatus, SignCompleteResponse
-from app.email import get_email_service, EmailTemplateContext
 
 logger = logging.getLogger(__name__)
 
@@ -129,75 +128,8 @@ async def process_and_finalize_signature(
             }
         await supabase.update_signing_session(session_id=session.id, updates=session_updates)
 
-        # Send notification emails (best-effort, don't fail the response)
-        # Wrapped in try/except to ensure signing response is returned even if email fails
-        try:
-            email_service = get_email_service()
-            all_signers = await supabase.get_signers(session.document_id, session.workspace_id)
-
-            # Get workspace data for email context
-            workspace_data = await supabase.admin_select("workspaces", {"id": session.workspace_id}, single=True)
-            workspace_name = workspace_data.get("name", "Podpisy") if workspace_data else "Podpisy"
-
-            # Notify the user who initiated the signing
-            creator_id = doc_data.get("created_by")
-            creator = await supabase.get_user_by_id(creator_id) if creator_id else None
-            creator_email = creator.get("email") if creator else None
-
-            if creator_email:
-                try:
-                    context = EmailTemplateContext(
-                        document_name=doc_data.get("name"),
-                        workspace_name=workspace_name,
-                        signer_name=session.name,
-                        signed_at=signed_at.strftime("%d. %m. %Y, %H:%M"),
-                    )
-                    await email_service.send_signed_notification(
-                        to_email=creator_email,
-                        context=context,
-                        workspace_id=session.workspace_id,
-                        http_client=supabase._http_client,
-                    )
-                    logger.info(f"Sent DOCUMENT_SIGNED email to creator for document {session.document_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send DOCUMENT_SIGNED email to creator: {e}")
-
-            # Check if all signers have signed
-            if await supabase.check_all_signed(session.document_id):
-                # Send ALL_SIGNED email to all signers and the creator
-                try:
-                    download_link = gcs.generate_download_signed_url(
-                        signed_gcs_path,
-                        expiration_minutes=settings.gcs_signed_url_expiration_minutes * 24 * 7, # 7 days
-                        filename=f"{doc_data.get('name', 'document')}_signed.pdf",
-                    )
-
-                    all_recipients = {signer['email'] for signer in all_signers if signer.get('email')}
-                    if creator_email:
-                        all_recipients.add(creator_email)
-
-                    for recipient in all_recipients:
-                        try:
-                            context = EmailTemplateContext(
-                                document_name=doc_data.get("name"),
-                                workspace_name=workspace_name,
-                                completed_at=signed_at.strftime("%d. %m. %Y, %H:%M"),
-                                download_link=download_link,
-                            )
-                            await email_service.send_all_signed_notification(
-                                to_email=recipient,
-                                context=context,
-                                workspace_id=session.workspace_id,
-                                http_client=supabase._http_client,
-                            )
-                            logger.info(f"Sent ALL_SIGNED email to {recipient[:3]}*** for document {session.document_id}")
-                        except Exception as e:
-                            logger.error(f"Failed to send ALL_SIGNED email to recipient: {e}")
-                except Exception as e:
-                    logger.error(f"Failed to send ALL_SIGNED emails: {e}")
-        except Exception as e:
-            # Log but don't fail - email is best-effort
-            logger.error(f"Email notification failed for session {session.id}: {e}")
+        # NOTE: Email notifications are handled by frontend/Edge Function
+        # Backend no longer sends emails to avoid duplicates
 
         # Generate download URL and create response
         signed_pdf_url = gcs.generate_download_signed_url(
