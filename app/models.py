@@ -619,6 +619,31 @@ class SigningErrorCode(str, Enum):
     SIGNING_IN_PROGRESS = "SIGNING_IN_PROGRESS"  # Concurrent signing attempt
     VALIDATION_ERROR = "VALIDATION_ERROR"
     SERVER_ERROR = "SERVER_ERROR"
+    # TSA errors (canonical codes - map to specific HTTP statuses)
+    TSA_UNAVAILABLE = "TSA_UNAVAILABLE"          # Network/timeout/refused -> HTTP 503
+    TSA_RATE_LIMITED = "TSA_RATE_LIMITED"        # HTTP 429 -> HTTP 429
+    TSA_INVALID_RESPONSE = "TSA_INVALID_RESPONSE"  # Parse/token error -> HTTP 502
+    TSA_TLS_ERROR = "TSA_TLS_ERROR"              # TLS/certificate -> HTTP 502
+    TSA_CLIENT_ERROR = "TSA_CLIENT_ERROR"        # HTTP 400/401/403 -> HTTP 400
+    # Storage errors
+    STORAGE_UPLOAD_FAILED = "STORAGE_UPLOAD_FAILED"
+    STORAGE_VERIFY_FAILED = "STORAGE_VERIFY_FAILED"
+    # PDF errors
+    PDF_SIGNING_FAILED = "PDF_SIGNING_FAILED"
+    PDF_INVALID = "PDF_INVALID"
+    # KMS errors
+    KMS_UNAVAILABLE = "KMS_UNAVAILABLE"
+    KMS_PERMISSION_DENIED = "KMS_PERMISSION_DENIED"
+
+
+# TSA error to HTTP status mapping
+TSA_ERROR_HTTP_STATUS = {
+    SigningErrorCode.TSA_UNAVAILABLE: 503,
+    SigningErrorCode.TSA_RATE_LIMITED: 429,
+    SigningErrorCode.TSA_INVALID_RESPONSE: 502,
+    SigningErrorCode.TSA_TLS_ERROR: 502,
+    SigningErrorCode.TSA_CLIENT_ERROR: 400,
+}
 
 
 # Alias mapping: canonical code → legacy code (for backward compatibility)

@@ -53,12 +53,96 @@ def _find_font(style: str = "regular") -> Optional[str]:
 
 @dataclass
 class SignaturePlacement:
-    """Signature placement coordinates (PDF coordinate system)."""
+    """
+    Signature placement coordinates with normalization support.
+
+    PDF coordinate system: origin at bottom-left, Y increases upward.
+    All coordinates in points (1 point = 1/72 inch).
+
+    Supports conversion from different coordinate systems:
+    - origin: "bottom-left" (PDF default), "top-left" (browser/image)
+    - unit: "pt" (points), "px" (pixels at 72 DPI), "mm", "in"
+    - rotation: 0, 90, 180, 270 degrees (page rotation)
+    """
     page: int  # 1-indexed page number
     x: float   # X from left in points
     y: float   # Y from bottom in points
     w: float   # Width in points
     h: float   # Height in points
+    origin: str = "bottom-left"  # Coordinate origin
+    unit: str = "pt"  # Unit of measurement
+    rotation: int = 0  # Page rotation in degrees
+
+    @classmethod
+    def from_normalized(
+        cls,
+        page: int,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        page_height: float,  # Page height in points for Y flip
+        origin: str = "bottom-left",
+        unit: str = "pt",
+        rotation: int = 0,
+    ) -> "SignaturePlacement":
+        """
+        Create placement from coordinates in any system, normalized to PDF coordinates.
+
+        Args:
+            page: 1-indexed page number
+            x, y, w, h: Coordinates in specified unit
+            page_height: Page height in points (needed for top-left origin)
+            origin: "bottom-left" (PDF) or "top-left" (browser)
+            unit: "pt", "px" (at 72 DPI), "mm", or "in"
+            rotation: Page rotation 0, 90, 180, 270
+        """
+        # Unit conversion factors to points
+        unit_to_pt = {
+            "pt": 1.0,
+            "px": 1.0,  # Assume 72 DPI (1px = 1pt)
+            "mm": 72.0 / 25.4,  # 25.4mm per inch
+            "in": 72.0,
+        }
+        factor = unit_to_pt.get(unit, 1.0)
+
+        # Convert to points
+        x_pt = x * factor
+        y_pt = y * factor
+        w_pt = w * factor
+        h_pt = h * factor
+
+        # Handle origin conversion (top-left to bottom-left)
+        if origin == "top-left":
+            # Flip Y: PDF origin is bottom-left, browser origin is top-left
+            y_pt = page_height - y_pt - h_pt
+
+        # TODO: Handle page rotation if needed
+        # For now, rotation is stored for audit but not applied
+
+        return cls(
+            page=page,
+            x=x_pt,
+            y=y_pt,
+            w=w_pt,
+            h=h_pt,
+            origin="bottom-left",  # Normalized to PDF
+            unit="pt",
+            rotation=rotation,
+        )
+
+    def to_dict(self) -> dict:
+        """Export placement with full metadata for audit."""
+        return {
+            "page": self.page,
+            "x": self.x,
+            "y": self.y,
+            "w": self.w,
+            "h": self.h,
+            "origin": self.origin,
+            "unit": self.unit,
+            "rotation": self.rotation,
+        }
 
 
 @dataclass

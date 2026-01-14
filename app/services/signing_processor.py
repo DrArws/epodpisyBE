@@ -200,10 +200,18 @@ async def process_and_finalize_signature(
         )
         logger.info(f"PAdES signing completed: profile={pades_audit.signature_profile if pades_audit else 'N/A'}")
 
-        # Upload the signed PDF
+        # Upload the signed PDF with atomicity check
         final_hash = compute_file_hash(local_signed)
         signed_gcs_path = f"{session.workspace_id}/{session.document_id}/signed/{uuid.uuid4()}_signed.pdf"
         gcs.upload_from_file(local_signed, signed_gcs_path, "application/pdf")
+
+        # Verify upload succeeded before updating DB (storage atomicity)
+        if not gcs.blob_exists(signed_gcs_path):
+            raise SigningError(
+                "Storage verification failed: uploaded file not found",
+                error_code="STORAGE_VERIFY_FAILED"
+            )
+        logger.info(f"Storage atomicity verified: {signed_gcs_path}")
 
         # Update database records
         await supabase.update_document(
@@ -221,6 +229,7 @@ async def process_and_finalize_signature(
             updates={"status": SignerStatus.SIGNED.value, "signed_at": signed_at.isoformat()},
         )
 
+        # Build comprehensive audit bundle
         session_updates = {
             "verification_id": verification_id,
             "signed_at": signed_at.isoformat(),
@@ -229,7 +238,21 @@ async def process_and_finalize_signature(
             "used_at": signed_at.isoformat(),
             "used_by_ip": ip_address,
             "used_user_agent": user_agent[:500] if user_agent else None,
-            "signature_placement": {"page": placement.page, "x": placement.x, "y": placement.y, "w": placement.w, "h": placement.h},
+            "signature_placement": placement.to_dict(),
+            # Audit bundle: comprehensive signing evidence
+            "audit_bundle": {
+                "ip_address": ip_address,
+                "user_agent": user_agent[:500] if user_agent else None,
+                "otp_channel": session_data.get("otp_channel"),
+                "otp_verified_at": session_data.get("otp_verified_at"),
+                "consent_version": "1.0",  # Track consent version for legal compliance
+                "consent_accepted_at": signed_at.isoformat(),
+                "document_viewed_at": session_data.get("viewed_at"),
+                "signing_requested_at": session_data.get("signing_started_at"),
+                "signing_completed_at": signed_at.isoformat(),
+                "document_hash_before": pades_audit.document_sha256_before if pades_audit else None,
+                "document_hash_after": final_hash,
+            },
         }
         if pades_audit:
             session_updates["pades_info"] = {
