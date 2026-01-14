@@ -97,8 +97,12 @@ class Settings(BaseSettings):
     @field_validator("allowed_origins", mode='before')
     @classmethod
     def _parse_allowed_origins(cls, v: Any) -> List[str]:
+        """Parse ALLOWED_ORIGINS from string (comma or semicolon separated) or list."""
         if isinstance(v, str) and v:
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
+            # Support both comma and semicolon as separators
+            # Semicolon is useful in Cloud Build where comma separates env vars
+            delimiter = ";" if ";" in v else ","
+            return [origin.strip() for origin in v.split(delimiter) if origin.strip()]
         if isinstance(v, list):
             return v
         return []
