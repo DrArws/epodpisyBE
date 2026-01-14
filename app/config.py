@@ -2,6 +2,7 @@
 Configuration module - loads secrets from Google Secret Manager.
 Falls back to environment variables for local development.
 """
+import json
 import os
 import logging
 from functools import lru_cache
@@ -97,14 +98,25 @@ class Settings(BaseSettings):
     @field_validator("allowed_origins", mode='before')
     @classmethod
     def _parse_allowed_origins(cls, v: Any) -> List[str]:
-        """Parse ALLOWED_ORIGINS from string (comma or semicolon separated) or list."""
-        if isinstance(v, str) and v:
-            # Support both comma and semicolon as separators
-            # Semicolon is useful in Cloud Build where comma separates env vars
-            delimiter = ";" if ";" in v else ","
-            return [origin.strip() for origin in v.split(delimiter) if origin.strip()]
+        """Parse ALLOWED_ORIGINS from JSON list, CSV, semicolon-separated string, or list."""
+        if v is None:
+            return []
         if isinstance(v, list):
             return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            # Try JSON list first (e.g., '["https://example.com", "https://other.com"]')
+            if s.startswith("["):
+                try:
+                    return json.loads(s)
+                except json.JSONDecodeError:
+                    pass  # Fall through to delimiter parsing
+            # Fallback: split by semicolon or comma
+            # Semicolon is useful in Cloud Build where comma separates env vars
+            parts = [p.strip() for p in s.replace(",", ";").split(";")]
+            return [p for p in parts if p]
         return []
 
     class Config:
