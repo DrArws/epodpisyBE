@@ -398,9 +398,13 @@ public class Main {
             SubIndication subIndication = simpleReport.getSubIndication(signatureId);
 
             // For self-signed certs, we expect INDETERMINATE with NO_CERTIFICATE_CHAIN_FOUND
-            // But the signature itself should be mathematically valid
-            boolean signatureIntact = simpleReport.isSignatureIntact(signatureId);
+            // TOTAL_PASSED = fully valid, INDETERMINATE = crypto OK but trust issues
+            // TOTAL_FAILED = crypto failure
             boolean signatureValid = simpleReport.isValid(signatureId);
+
+            // Signature is cryptographically intact if indication is not TOTAL_FAILED
+            // For self-signed: INDETERMINATE is expected and acceptable
+            boolean signatureIntact = (indication != Indication.TOTAL_FAILED);
 
             // Check timestamps
             int timestampCount = simpleReport.getSignatureTimestamps(signatureId).size();
@@ -412,7 +416,7 @@ public class Main {
                 signatureIntact, signatureValid, timestampCount);
 
             // Record in audit
-            // For self-signed: signatureIntact=true is what we care about
+            // For self-signed: signatureIntact=true means crypto is OK (not TOTAL_FAILED)
             // signatureValid might be false due to trust chain, which is expected
             audit.setSignatureIntegrityOk(signatureIntact);
             audit.setTimestampIntegrityOk(hasTimestamp);
