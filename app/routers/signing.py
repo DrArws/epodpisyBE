@@ -26,6 +26,7 @@ from app.models import (
     SigningSessionResponse,
     SigningErrorCode,
     SigningErrorResponse,
+    ERROR_CODE_ALIASES,
     OtpSendRequestV2,
     OtpSendResponseV2,
     OtpVerifyRequestV2,
@@ -246,20 +247,46 @@ async def get_signing_session(
         code = detail.get("code", "AUTH_ERROR")
 
         if code == "SESSION_EXPIRED":
-            # Try to get expiry time from the token hash lookup
             return signing_error_response(
                 410,
                 SigningErrorCode.SIGN_LINK_EXPIRED,
                 "Platnost odkazu pro podpis vypršela.",
-                expired_at=datetime.now(timezone.utc),  # Approximate
+                expired_at=datetime.now(timezone.utc),
             )
         elif code == "ALREADY_SIGNED":
-            return signing_error_response(
-                409,
-                SigningErrorCode.SIGN_ALREADY_COMPLETED,
-                "Tento dokument jste již podepsali.",
-                signed_at=datetime.now(timezone.utc),  # Approximate - actual time in session
-            )
+            # Return 200 with status="completed" instead of 409
+            # Try to get signed document info
+            try:
+                token_hash = hash_signing_token(token)
+                session_data = await supabase.get_signing_session_admin(token_hash)
+                signer_data = session_data.get("document_signers", {}) if session_data else {}
+                doc_data = await supabase.get_document_for_signing_admin(session_data.get("document_id")) if session_data else None
+
+                signed_pdf_url = None
+                if doc_data and doc_data.get("gcs_signed_path"):
+                    signed_pdf_url = gcs.generate_download_signed_url(
+                        doc_data["gcs_signed_path"],
+                        expiration_minutes=settings.gcs_signed_url_expiration_minutes,
+                        filename=f"{doc_data.get('name', 'document')}_signed.pdf",
+                    )
+
+                return SigningSessionResponse(
+                    status="completed",
+                    document_name=doc_data.get("name", "Dokument") if doc_data else "Dokument",
+                    signer_name=signer_data.get("name", "Podepisující"),
+                    signer_email_masked=mask_email(signer_data.get("email")),
+                    signer_phone_masked=mask_phone(signer_data.get("phone")),
+                    signed_pdf_url=signed_pdf_url,
+                    signed_at=parse_db_timestamp(signer_data.get("signed_at")),
+                )
+            except Exception as inner_e:
+                logger.warning(f"Could not get signed doc info: {inner_e}")
+                # Fallback to minimal completed response
+                return SigningSessionResponse(
+                    status="completed",
+                    document_name="Dokument",
+                    signer_name="Podepisující",
+                )
         else:
             return signing_error_response(
                 404,
@@ -268,12 +295,37 @@ async def get_signing_session(
             )
 
     except AuthorizationError as e:
-        return signing_error_response(
-            409,
-            SigningErrorCode.SIGN_ALREADY_COMPLETED,
-            "Tento dokument jste již podepsali.",
-            signed_at=datetime.now(timezone.utc),
-        )
+        # Also return 200 with status="completed" for AuthorizationError
+        try:
+            token_hash = hash_signing_token(token)
+            session_data = await supabase.get_signing_session_admin(token_hash)
+            signer_data = session_data.get("document_signers", {}) if session_data else {}
+            doc_data = await supabase.get_document_for_signing_admin(session_data.get("document_id")) if session_data else None
+
+            signed_pdf_url = None
+            if doc_data and doc_data.get("gcs_signed_path"):
+                signed_pdf_url = gcs.generate_download_signed_url(
+                    doc_data["gcs_signed_path"],
+                    expiration_minutes=settings.gcs_signed_url_expiration_minutes,
+                    filename=f"{doc_data.get('name', 'document')}_signed.pdf",
+                )
+
+            return SigningSessionResponse(
+                status="completed",
+                document_name=doc_data.get("name", "Dokument") if doc_data else "Dokument",
+                signer_name=signer_data.get("name", "Podepisující"),
+                signer_email_masked=mask_email(signer_data.get("email")),
+                signer_phone_masked=mask_phone(signer_data.get("phone")),
+                signed_pdf_url=signed_pdf_url,
+                signed_at=parse_db_timestamp(signer_data.get("signed_at")),
+            )
+        except Exception as inner_e:
+            logger.warning(f"Could not get signed doc info: {inner_e}")
+            return SigningSessionResponse(
+                status="completed",
+                document_name="Dokument",
+                signer_name="Podepisující",
+            )
 
     except Exception as e:
         logger.error(f"Unexpected error in get_signing_session: {e}", exc_info=True)
@@ -311,7 +363,7 @@ async def send_otp(
         if not allowed:
             return signing_error_response(
                 429,
-                SigningErrorCode.TOO_MANY_REQUESTS,
+                SigningErrorCode.OTP_RATE_LIMITED,
                 error_msg or "Příliš mnoho pokusů.",
                 retry_after_seconds=retry_after or 60,
             )
@@ -539,9 +591,14 @@ async def complete_signature(
 
         if not acquired_lock:
             logger.info(f"complete_signature: lock not acquired, reason={reason}, session_fp={session_fp}")
+
+            # IDEMPOTENT_REPLAY: Same Idempotency-Key, return 200 with cached response
+            if reason == "IDEMPOTENT_REPLAY" and cached_response:
+                logger.info(f"complete_signature: idempotent replay, returning cached response")
+                return JSONResponse(status_code=200, content=cached_response)
+
+            # ALREADY_SIGNED: Document was signed (possibly by different request)
             if reason == "ALREADY_SIGNED" or reason == "IDEMPOTENT_REPLAY":
-                if cached_response:
-                    return JSONResponse(status_code=409, content=cached_response)
                 doc_data = await supabase.get_document_for_signing_admin(session.document_id)
                 signed_pdf_url = None
                 if doc_data and doc_data.get("gcs_signed_path"):
@@ -550,8 +607,9 @@ async def complete_signature(
                         expiration_minutes=settings.gcs_signed_url_expiration_minutes,
                         filename=f"{doc_data.get('name', 'document')}_signed.pdf",
                     )
+                # Return 200 for idempotent behavior (FE can safely retry)
                 return JSONResponse(
-                    status_code=409,
+                    status_code=200,
                     content=SignCompleteResponse(
                         status="completed",
                         signed_pdf_url=signed_pdf_url,
@@ -559,8 +617,11 @@ async def complete_signature(
                         message="Dokument již byl podepsán.",
                     ).model_dump(mode="json"),
                 )
+
+            # IN_PROGRESS/RACE_LOST: Concurrent signing attempt - return 409
             if reason in ("IN_PROGRESS", "RACE_LOST"):
-                return signing_error_response(409, SigningErrorCode.VALIDATION_ERROR, "Podepisování již probíhá. Počkejte prosím.")
+                return signing_error_response(409, SigningErrorCode.SIGNING_IN_PROGRESS, "Podepisování již probíhá. Počkejte prosím.")
+
             return signing_error_response(404, SigningErrorCode.SIGN_LINK_INVALID, "Session nenalezena.")
 
         logger.info(f"complete_signature: lock acquired, proceeding, session_fp={session_fp}")

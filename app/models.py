@@ -562,34 +562,58 @@ class SigningSessionResponse(BaseModel):
     """
     GET /v1/signing/sessions/{token} response.
     Flat structure matching FE contract.
+
+    Status values:
+    - "valid": Session is valid, ready for signing
+    - "completed": Document already signed (includes signed_pdf_url if available)
     """
-    status: str = Field(default="valid", description="Session status")
+    status: str = Field(default="valid", description="Session status: valid | completed")
     document_name: str = Field(..., description="Name of the document")
     signer_name: str = Field(..., description="Name of the signer")
     signer_email_masked: Optional[str] = Field(None, description="Masked email")
     signer_phone_masked: Optional[str] = Field(None, description="Masked phone")
-    expires_at: datetime = Field(..., description="Session expiry time")
-    expires_in_seconds: int = Field(..., description="Seconds until expiry")
-    requires_otp: bool = Field(..., description="OTP verification required")
-    otp_status: OTPStatus = Field(..., description="Current OTP status")
-    pdf_preview_url: Optional[str] = Field(None, description="Signed URL for PDF")
+    # For status="valid" - signing info
+    expires_at: Optional[datetime] = Field(None, description="Session expiry time")
+    expires_in_seconds: Optional[int] = Field(None, description="Seconds until expiry")
+    requires_otp: Optional[bool] = Field(None, description="OTP verification required")
+    otp_status: Optional[OTPStatus] = Field(None, description="Current OTP status")
+    pdf_preview_url: Optional[str] = Field(None, description="Signed URL for PDF preview")
     page_count: Optional[int] = Field(None, description="Number of pages")
     sign_fields: List[SignField] = Field(default_factory=list, description="Signature fields")
     whatsapp_available: bool = Field(default=True, description="WhatsApp OTP available")
     document_checksum: Optional[str] = Field(None, description="SHA-256 of document")
+    # For status="completed" - signed document info
+    signed_pdf_url: Optional[str] = Field(None, description="URL to download signed PDF")
+    signed_at: Optional[datetime] = Field(None, description="When document was signed")
 
 
 class SigningErrorCode(str, Enum):
     """Error codes for signing flow."""
+    # Token/session errors
     SIGN_LINK_INVALID = "SIGN_LINK_INVALID"
     SIGN_LINK_EXPIRED = "SIGN_LINK_EXPIRED"
     SIGN_ALREADY_COMPLETED = "SIGN_ALREADY_COMPLETED"
+    # OTP errors
     OTP_NOT_VERIFIED = "OTP_NOT_VERIFIED"
     OTP_INVALID = "OTP_INVALID"
-    TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS"
+    OTP_RATE_LIMITED = "OTP_RATE_LIMITED"  # Alias-compatible with TOO_MANY_REQUESTS
+    TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS"  # Legacy, use OTP_RATE_LIMITED
     OTP_TOO_MANY_ATTEMPTS = "OTP_TOO_MANY_ATTEMPTS"
+    # Signing errors
+    SIGNING_IN_PROGRESS = "SIGNING_IN_PROGRESS"  # Concurrent signing attempt
     VALIDATION_ERROR = "VALIDATION_ERROR"
     SERVER_ERROR = "SERVER_ERROR"
+
+
+# Alias mapping: canonical code → legacy code (for backward compatibility)
+ERROR_CODE_ALIASES = {
+    "SIGN_LINK_INVALID": "TOKEN_NOT_FOUND",
+    "SIGN_LINK_EXPIRED": "TOKEN_EXPIRED",
+    "TOO_MANY_REQUESTS": "OTP_RATE_LIMITED",
+    "OTP_RATE_LIMITED": "OTP_RATE_LIMITED",
+    "SIGN_ALREADY_COMPLETED": "ALREADY_SIGNED",
+    "SIGNING_IN_PROGRESS": "SIGNING_IN_PROGRESS",
+}
 
 
 class SigningErrorResponse(BaseModel):
@@ -597,12 +621,19 @@ class SigningErrorResponse(BaseModel):
     error: bool = True
     code: SigningErrorCode
     message: str
+    # Alias code for FE compatibility (e.g., TOKEN_NOT_FOUND for SIGN_LINK_INVALID)
+    alias_code: Optional[str] = None
     details: Optional[dict] = None
     remaining_attempts: Optional[int] = None
     retry_after_seconds: Optional[int] = None
     locked_until: Optional[datetime] = None
     expired_at: Optional[datetime] = None
     signed_at: Optional[datetime] = None
+
+    def model_post_init(self, __context) -> None:
+        """Auto-populate alias_code from ERROR_CODE_ALIASES."""
+        if self.alias_code is None and self.code:
+            self.alias_code = ERROR_CODE_ALIASES.get(self.code.value)
 
 
 class OtpSendRequestV2(BaseRequest):
