@@ -335,7 +335,7 @@ async def send_otp(
 
         # Update session
         supabase.increment_otp_send_count(session.id)
-        supabase.update_signing_session(
+        await supabase.update_signing_session(
             session_id=session.id,
             updates={
                 "otp_channel": request_body.channel.value,
@@ -417,7 +417,7 @@ async def verify_otp(
             # Reset attempts and mark verified
             supabase.reset_otp_verify_attempts(session.id)
             verified_at = utc_now()
-            supabase.update_signing_session(
+            await supabase.update_signing_session(
                 session_id=session.id,
                 updates={
                     "otp_verified_at": verified_at.isoformat(),

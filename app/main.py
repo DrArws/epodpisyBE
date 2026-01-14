@@ -1676,7 +1676,7 @@ async def send_otp(
     supabase.increment_otp_send_count(session.id)
 
     # Update session with OTP channel
-    supabase.update_signing_session(
+    await supabase.update_signing_session(
         session_id=session.id,
         updates={
             "otp_channel": request_body.channel.value,
@@ -1742,7 +1742,7 @@ async def verify_otp(
 
         # Update session
         verified_at = utc_now()
-        supabase.update_signing_session(
+        await supabase.update_signing_session(
             session_id=session.id,
             updates={
                 "otp_verified_at": verified_at.isoformat(),
@@ -1859,11 +1859,12 @@ async def sign_document(
                     expiration_minutes=settings.gcs_signed_url_expiration_minutes,
                     filename=f"{doc_data.get('name', 'document')}_signed.pdf",
                 )
+                is_doc_complete = await supabase.check_all_signed(session.document_id)
                 return SignResponse(
                     success=True,
                     signed_pdf_url=signed_pdf_url,
                     signed_at=session_data.get("signed_at"),
-                    is_document_complete=supabase.check_all_signed(session.document_id),
+                    is_document_complete=is_doc_complete,
                     message="Document already signed (idempotent response)",
                 )
 
@@ -1968,7 +1969,11 @@ async def sign_document(
         await supabase.update_document(
             document_id=session.document_id,
             workspace_id=session.workspace_id,
-            updates={"gcs_signed_path": signed_gcs_path},
+            updates={
+                "gcs_signed_path": signed_gcs_path,
+                "status": "completed",
+                "completed_at": signed_at.isoformat(),
+            },
         )
 
         # Update signer status
@@ -2003,7 +2008,7 @@ async def sign_document(
                 "document_hash_before": pades_audit.document_sha256_before,
                 "document_hash_after": pades_audit.document_sha256_after,
             }
-        supabase.update_signing_session(
+        await supabase.update_signing_session(
             session_id=session.id,
             updates=session_updates,
         )
@@ -2012,7 +2017,7 @@ async def sign_document(
         logger.info(f"Signer {session.signer_id} signed document, verification_id: {verification_id}")
 
         # Check if all signers have signed
-        is_complete = supabase.check_all_signed(session.document_id)
+        is_complete = await supabase.check_all_signed(session.document_id)
 
         # Generate download URL for signed PDF
         signed_pdf_url = gcs.generate_download_signed_url(

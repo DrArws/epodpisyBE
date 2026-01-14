@@ -115,9 +115,19 @@ class SupabaseClient:
             "X-Admin-Secret": self.settings.admin_api_secret,
         }
 
-        response = await self._http_client.patch(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.json()
+        logger.info(f"admin_update: PATCH {url} for {table_name}/{record_id[:8]}...")
+        try:
+            response = await self._http_client.patch(url, headers=headers, json=data)
+            logger.info(f"admin_update: response status={response.status_code}")
+            if response.status_code != 200:
+                logger.warning(f"admin_update: response body='{response.text}'")
+            response.raise_for_status()
+            result = response.json()
+            logger.info(f"admin_update: success for {table_name}/{record_id[:8]}...")
+            return result
+        except Exception as e:
+            logger.error(f"admin_update: FAILED for {table_name}/{record_id[:8]}..., error={e}")
+            raise
 
     async def admin_select(
         self,
@@ -309,22 +319,20 @@ class SupabaseClient:
 
         return result
 
-    def update_signing_session(
+    async def update_signing_session(
         self,
         session_id: str,
         updates: Dict[str, Any],
     ) -> Dict:
-        """Update a signing session."""
+        """Update a signing session. Uses admin_update to bypass RLS."""
         updates["updated_at"] = utc_now().isoformat()
 
-        result = self.table("signing_sessions").update(updates).eq(
-            "id", session_id
-        ).execute()
+        result = await self.admin_update("signing_sessions", session_id, updates)
 
-        if not result.data:
+        if not result:
             raise ValueError(f"Session not found: {session_id}")
 
-        return result.data[0]
+        return result
 
     def try_acquire_signing_lock(
         self,

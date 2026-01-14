@@ -97,7 +97,11 @@ async def process_and_finalize_signature(
         await supabase.update_document(
             document_id=session.document_id,
             workspace_id=session.workspace_id,
-            updates={"gcs_signed_path": signed_gcs_path},
+            updates={
+                "gcs_signed_path": signed_gcs_path,
+                "status": "completed",
+                "completed_at": signed_at.isoformat(),
+            },
         )
         await supabase.update_signer(
             signer_id=session.signer_id,
@@ -123,7 +127,7 @@ async def process_and_finalize_signature(
                 "document_hash_before": pades_audit.document_sha256_before,
                 "document_hash_after": pades_audit.document_sha256_after,
             }
-        supabase.update_signing_session(session_id=session.id, updates=session_updates)
+        await supabase.update_signing_session(session_id=session.id, updates=session_updates)
 
         # Send notification emails (best-effort, don't fail the response)
         # Wrapped in try/except to ensure signing response is returned even if email fails
