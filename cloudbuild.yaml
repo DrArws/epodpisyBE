@@ -17,6 +17,7 @@ steps:
       - '--image=europe-west1-docker.pkg.dev/${PROJECT_ID}/esign-repo/e-signing-service:${SHORT_SHA}'
       - '--region=europe-west1'
       - '--platform=managed'
+      - '--service-account=e-signing-runtime@baconauth.iam.gserviceaccount.com'
       - '--allow-unauthenticated'
       - '--execution-environment=gen2'
       - '--set-env-vars=GCP_PROJECT_ID=${PROJECT_ID},ENVIRONMENT=production'
