@@ -189,6 +189,12 @@ public class FallbackTSPSource implements TSPSource {
         dataLoader.setTimeoutConnectionRequest(connectTimeoutMs);
 
         tspSource.setDataLoader(dataLoader);
+
+        // CRITICAL: Request certificate in TSP response
+        // Many TSAs (APED, SwissSign) require certReq=true or return HTTP 400
+        // This sets the certReq field in the TimeStampReq ASN.1 structure
+        tspSource.setCertReq(true);
+
         return tspSource;
     }
 
