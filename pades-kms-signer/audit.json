@@ -1,0 +1,18 @@
+{
+  "session_id" : "a2111950-4a3f-4491-bf9d-8757e304a098",
+  "document_sha256_before" : "6b19ceabb491802dc777cd149c3f305cc1e240db610c2f943c18cc4d9ab92c16",
+  "document_sha256_after" : "dbc8798e318a59e180309960e04c07ab618a15f292635bdb5f30b195f54639da",
+  "kms_key_version" : "projects/baconauth/locations/europe-west1/keyRings/E-podpisy/cryptoKeys/pdf-key/cryptoKeyVersions/1",
+  "signing_time_utc" : "2026-01-13T09:09:02.490Z",
+  "tsa_url" : "http://timestamp.digicert.com",
+  "tsa_token_time" : "2026-01-13T09:09:04.631249503Z",
+  "signer_display_name" : "Test Signer",
+  "ip" : "127.0.0.1",
+  "user_agent" : "pades-kms-signer/1.0.0",
+  "otp_method" : "none",
+  "signature_profile" : "PAdES-BASELINE-T",
+  "input_file" : "input.pdf",
+  "output_file" : "test_signed.pdf",
+  "success" : true,
+  "errors" : [ ]
+}

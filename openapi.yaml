@@ -1,0 +1,2078 @@
+openapi: 3.1.0
+info:
+  title: E-Signing Service API
+  description: |
+    Backend service pro elektronické podepisování dokumentů.
+
+    ## Autentifikace
+
+    API používá tři typy autentifikace:
+
+    1. **Google ID Token** - Pro authenticated endpointy (`/v1/me`, `/v1/documents/*`)
+       - Header: `Authorization: Bearer {google_id_token}`
+       - Header: `X-Workspace-ID: {workspace_uuid}`
+
+    2. **Admin Secret + User ID** - Pro Edge Function volání
+       - Header: `X-Admin-Secret: {admin_secret}`
+       - Header: `X-User-ID: {user_supabase_uuid}`
+       - Header: `X-User-Email: {user_email}` (optional)
+       - Header: `X-User-Name: {user_name}` (optional)
+       - Header: `X-Workspace-ID: {workspace_uuid}`
+
+    3. **Magic Link Token** - Pro signing session endpointy (`/v1/signing/*`)
+       - Token je součástí URL path parametru
+       - Veřejné endpointy, nevyžadují autentifikaci
+
+    ## Rate Limiting
+
+    - `/v1/verify/*` endpointy: 10 požadavků/minutu per IP
+    - `/v1/signing/sessions/*/otp/send`: 5 OTP/hodinu per session, 60s cooldown
+    - `/v1/signing/sessions/*/otp/verify`: 5 pokusů, pak 15min lock
+  version: 2.0.0
+  contact:
+    name: E-Signing Service Support
+
+servers:
+  - url: https://e-signing-service-526681856440.europe-west1.run.app
+    description: Production server
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: health
+    description: Health check endpointy
+  - name: auth
+    description: Autentifikace
+  - name: users
+    description: Uživatelské operace
+  - name: documents
+    description: Správa dokumentů
+  - name: signing
+    description: Veřejné podepisování dokumentů (v2 API)
+  - name: signing-sessions
+    description: Podepisování dokumentů (legacy v1 API)
+  - name: verification
+    description: Veřejná verifikace podpisů
+  - name: email
+    description: Email operace
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Google ID Token
+      description: Google ID Token získaný přes OAuth2 flow
+
+    AdminSecret:
+      type: apiKey
+      in: header
+      name: X-Admin-Secret
+      description: Admin API secret pro Edge Function autentifikaci
+
+    UserID:
+      type: apiKey
+      in: header
+      name: X-User-ID
+      description: User Supabase UUID (required s X-Admin-Secret)
+
+    WorkspaceID:
+      type: apiKey
+      in: header
+      name: X-Workspace-ID
+      description: Workspace UUID pro multi-tenant přístup
+
+  headers:
+    X-Workspace-ID:
+      description: UUID workspace uživatele
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # Enums
+    OTPChannel:
+      type: string
+      enum: [sms, whatsapp]
+      description: Kanál pro odeslání OTP
+
+    SignerStatus:
+      type: string
+      enum: [pending, viewed, verified, signed, declined]
+      description: Status podepisujícího
+
+    DocumentStatus:
+      type: string
+      enum: [draft, sent, pending, in_progress, completed, cancelled, expired]
+      description: Status dokumentu
+
+    OTPStatus:
+      type: string
+      enum: [not_required, required, sent, verified]
+      description: |
+        Status OTP verifikace:
+        - not_required: Telefon není k dispozici, OTP nepotřebné
+        - required: OTP vyžadováno, ale ještě neodesláno
+        - sent: OTP odesláno, čeká na ověření
+        - verified: OTP úspěšně ověřeno
+
+    DeliveryStatus:
+      type: string
+      enum: [not_sent, sent, failed, skipped]
+      description: Status doručení zprávy
+
+    EmailTemplateType:
+      type: string
+      enum: [DOCUMENT_SEND, REMINDER, DOCUMENT_SIGNED, ALL_SIGNED]
+      description: Typ emailové šablony
+
+    SigningErrorCode:
+      type: string
+      enum:
+        - SIGN_LINK_INVALID
+        - SIGN_LINK_EXPIRED
+        - SIGN_ALREADY_COMPLETED
+        - OTP_NOT_VERIFIED
+        - OTP_NOT_SENT
+        - OTP_INVALID
+        - OTP_EXPIRED
+        - TOO_MANY_REQUESTS
+        - OTP_TOO_MANY_ATTEMPTS
+        - SIGNING_IN_PROGRESS
+        - SIGNING_FAILED
+        - INVALID_PLACEMENT
+        - CONSENT_REQUIRED
+        - VALIDATION_ERROR
+        - SERVER_ERROR
+      description: |
+        Kódy chyb pro FE state machine:
+        - SIGN_LINK_INVALID: Token neexistuje nebo byl zneplatněn (404)
+        - SIGN_LINK_EXPIRED: Token vypršel (410)
+        - SIGN_ALREADY_COMPLETED: Dokument již podepsán (409) - FE může považovat za success
+        - OTP_NOT_VERIFIED: OTP vyžadováno ale neověřeno (403)
+        - OTP_NOT_SENT: OTP nebylo odesláno (400)
+        - OTP_INVALID: Nesprávný OTP kód (401)
+        - OTP_EXPIRED: OTP kód vypršel (401)
+        - TOO_MANY_REQUESTS: Rate limit pro OTP send (429)
+        - OTP_TOO_MANY_ATTEMPTS: Příliš mnoho neúspěšných pokusů (429)
+        - SIGNING_IN_PROGRESS: Jiný request právě podepisuje (409)
+        - SIGNING_FAILED: Podepisování selhalo (500)
+        - INVALID_PLACEMENT: Neplatné umístění podpisu (422)
+        - CONSENT_REQUIRED: Chybí souhlas (422)
+        - VALIDATION_ERROR: Obecná validační chyba (422)
+        - SERVER_ERROR: Interní chyba serveru (500)
+
+    # Request schemas
+    AuthGoogleRequest:
+      type: object
+      required:
+        - code
+        - redirect_uri
+      properties:
+        code:
+          type: string
+          description: OAuth2 authorization code z Google
+        redirect_uri:
+          type: string
+          description: Redirect URI použitý při autorizaci
+
+    SignerInput:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Jméno podepisujícího
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Email podepisujícího
+        phone:
+          type: string
+          maxLength: 20
+          description: Telefon podepisujícího (pro OTP)
+        signing_order:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Pořadí podpisu
+
+    CreateDocumentRequest:
+      type: object
+      required:
+        - name
+        - signers
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Název dokumentu
+        signers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/SignerInput'
+          description: Seznam podepisujících
+
+    UploadUrlRequest:
+      type: object
+      required:
+        - filename
+        - content_type
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Název souboru
+        content_type:
+          type: string
+          description: |
+            MIME typ souboru. Povolené hodnoty:
+            - application/pdf
+            - application/msword, application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+            - application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.presentationml.presentation
+            - image/jpeg, image/png, image/gif, image/webp, image/tiff, image/bmp
+            - text/plain, text/csv
+            - application/rtf
+
+    ConvertToPdfRequest:
+      type: object
+      required:
+        - storage_path
+        - filename
+        - content_type
+      properties:
+        storage_path:
+          type: string
+          minLength: 1
+          description: GCS cesta z upload-url response
+        filename:
+          type: string
+          minLength: 1
+          description: Původní název souboru
+        content_type:
+          type: string
+          minLength: 1
+          description: MIME typ souboru
+
+    SendDocumentRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          maxLength: 1000
+          description: Volitelná zpráva pro podepisující
+        send_email:
+          type: boolean
+          default: true
+          description: Odeslat signing link emailem
+        send_sms:
+          type: boolean
+          default: false
+          description: Odeslat signing link SMS
+        dry_run:
+          type: boolean
+          default: false
+          description: Vytvořit sessions bez odeslání zpráv
+
+    SendOTPRequest:
+      type: object
+      required:
+        - channel
+      properties:
+        channel:
+          $ref: '#/components/schemas/OTPChannel'
+
+    VerifyOTPRequest:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          minLength: 4
+          maxLength: 10
+          pattern: '^\d+$'
+          description: OTP kód (pouze číslice)
+
+    SignaturePlacement:
+      type: object
+      required:
+        - page
+        - x
+        - y
+        - w
+        - h
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: Číslo stránky (1-indexed)
+        x:
+          type: number
+          minimum: 0
+          description: X souřadnice v PDF bodech od levého okraje
+        y:
+          type: number
+          minimum: 0
+          description: Y souřadnice v PDF bodech od spodního okraje
+        w:
+          type: number
+          exclusiveMinimum: 0
+          description: Šířka v PDF bodech
+        h:
+          type: number
+          exclusiveMinimum: 0
+          description: Výška v PDF bodech
+
+    SignRequest:
+      type: object
+      required:
+        - signature_png_base64
+        - placement
+        - consent
+      properties:
+        signature_png_base64:
+          type: string
+          minLength: 100
+          description: Base64 encoded PNG obrázek podpisu
+        placement:
+          $ref: '#/components/schemas/SignaturePlacement'
+        consent:
+          type: boolean
+          description: Souhlas s podpisem (musí být true)
+
+    # V2 Signing Request schemas
+    OtpSendRequestV2:
+      type: object
+      required:
+        - channel
+      properties:
+        channel:
+          $ref: '#/components/schemas/OTPChannel'
+
+    OtpVerifyRequestV2:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          minLength: 4
+          maxLength: 6
+          pattern: '^[0-9]+$'
+          description: 4-6 místný OTP kód
+
+    SignCompleteRequest:
+      type: object
+      required:
+        - signature_image_base64
+        - consent_accepted
+      properties:
+        signature_image_base64:
+          type: string
+          minLength: 100
+          description: Base64 encoded PNG obrázek podpisu
+        field_id:
+          type: string
+          description: ID signature field (z sign_fields)
+        consent_accepted:
+          type: boolean
+          description: Souhlas s podpisem (musí být true)
+
+    VerifyHashRequest:
+      type: object
+      required:
+        - file_hash
+      properties:
+        file_hash:
+          type: string
+          description: SHA-256 hash PDF souboru
+
+    # Response schemas
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        version:
+          type: string
+          example: 1.0.0
+
+    AuthenticatedUser:
+      type: object
+      properties:
+        user_id:
+          type: string
+          description: Google 'sub' identifikátor
+        internal_user_id:
+          type: string
+          format: uuid
+          description: Interní Supabase UUID
+        workspace_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        picture:
+          type: string
+          format: uri
+        role:
+          type: string
+
+    SignerResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        status:
+          $ref: '#/components/schemas/SignerStatus'
+        signing_order:
+          type: integer
+        viewed_at:
+          type: string
+          format: date-time
+        signed_at:
+          type: string
+          format: date-time
+
+    DocumentResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          $ref: '#/components/schemas/DocumentStatus'
+        workspace_id:
+          type: string
+          format: uuid
+        gcs_pdf_path:
+          type: string
+        page_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+        signers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignerResponse'
+
+    DocumentListResponse:
+      type: object
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentResponse'
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+
+    UploadUrlResponse:
+      type: object
+      properties:
+        signed_upload_url:
+          type: string
+          format: uri
+          description: URL pro PUT upload souboru
+        gcs_path:
+          type: string
+          description: GCS cesta pro convert-to-pdf
+        expires_in_seconds:
+          type: integer
+
+    ConvertToPdfResponse:
+      type: object
+      properties:
+        pdf_gcs_path:
+          type: string
+        pdf_download_url:
+          type: string
+          format: uri
+        page_count:
+          type: integer
+
+    DeliveryAttempt:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        status:
+          $ref: '#/components/schemas/DeliveryStatus'
+        provider_message_id:
+          type: string
+        error:
+          type: string
+
+    DeliverySummary:
+      type: object
+      properties:
+        send_email:
+          type: boolean
+        send_sms:
+          type: boolean
+        dry_run:
+          type: boolean
+        emails_sent:
+          type: integer
+        emails_failed:
+          type: integer
+        sms_sent:
+          type: integer
+        sms_failed:
+          type: integer
+
+    SignerWithLink:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        sign_url:
+          type: string
+          format: uri
+          description: Absolutní URL pro podpis
+        signing_link:
+          type: string
+          format: uri
+          description: Alias pro sign_url (FE compatibility)
+        expires_at:
+          type: string
+          format: date-time
+        email_delivery:
+          $ref: '#/components/schemas/DeliveryAttempt'
+        sms_delivery:
+          $ref: '#/components/schemas/DeliveryAttempt'
+
+    SendDocumentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        document_id:
+          type: string
+          format: uuid
+        document_name:
+          type: string
+        signers:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignerWithLink'
+        delivery:
+          $ref: '#/components/schemas/DeliverySummary'
+
+    DownloadLinksResponse:
+      type: object
+      properties:
+        original_url:
+          type: string
+          format: uri
+        pdf_url:
+          type: string
+          format: uri
+        signed_url:
+          type: string
+          format: uri
+        evidence_url:
+          type: string
+          format: uri
+        expires_in_seconds:
+          type: integer
+
+    FinalizeResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        evidence_report_path:
+          type: string
+        evidence_download_url:
+          type: string
+          format: uri
+        document_hash:
+          type: string
+        completed_at:
+          type: string
+          format: date-time
+
+    # Legacy V1 Signing Session Responses
+    ValidateSessionResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        document_id:
+          type: string
+          format: uuid
+        document_name:
+          type: string
+        signer_name:
+          type: string
+        signer_email:
+          type: string
+          format: email
+        signer_status:
+          $ref: '#/components/schemas/SignerStatus'
+        requires_otp:
+          type: boolean
+        otp_verified:
+          type: boolean
+        pdf_download_url:
+          type: string
+          format: uri
+        page_count:
+          type: integer
+        message:
+          type: string
+
+    OTPSendResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        channel:
+          $ref: '#/components/schemas/OTPChannel'
+        message:
+          type: string
+
+    OTPVerifyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        verified:
+          type: boolean
+        message:
+          type: string
+
+    SignResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        signed_pdf_url:
+          type: string
+          format: uri
+        signed_at:
+          type: string
+          format: date-time
+        is_document_complete:
+          type: boolean
+          description: True pokud všichni podepisující podepsali
+        message:
+          type: string
+
+    # V2 Signing API Responses
+    SignField:
+      type: object
+      required: [id, page, x, y, w, h]
+      properties:
+        id:
+          type: string
+          description: Unique field identifier
+        page:
+          type: integer
+          minimum: 1
+          description: Page number (1-indexed)
+        x:
+          type: number
+          description: X coordinate in PDF points
+        y:
+          type: number
+          description: Y coordinate in PDF points
+        w:
+          type: number
+          description: Width in PDF points
+        h:
+          type: number
+          description: Height in PDF points
+
+    SigningSessionResponse:
+      type: object
+      required:
+        - status
+        - document_name
+        - signer_name
+        - expires_at
+        - expires_in_seconds
+        - requires_otp
+        - otp_status
+        - whatsapp_available
+      properties:
+        status:
+          type: string
+          enum: [valid]
+          description: Session status
+        document_name:
+          type: string
+          description: Název dokumentu k podpisu
+        signer_name:
+          type: string
+          description: Jméno podepisujícího
+        signer_email_masked:
+          type: string
+          nullable: true
+          description: Maskovaný email (j***@example.com)
+        signer_phone_masked:
+          type: string
+          nullable: true
+          description: Maskovaný telefon (***6789)
+        expires_at:
+          type: string
+          format: date-time
+          description: Kdy session vyprší
+        expires_in_seconds:
+          type: integer
+          description: Sekund do vypršení
+        requires_otp:
+          type: boolean
+          description: Zda je vyžadováno OTP ověření
+        otp_status:
+          $ref: '#/components/schemas/OTPStatus'
+        pdf_preview_url:
+          type: string
+          nullable: true
+          description: Signed URL pro náhled PDF (TTL ~10 min)
+        page_count:
+          type: integer
+          nullable: true
+          description: Počet stránek dokumentu
+        sign_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignField'
+          description: Pole pro umístění podpisu
+        whatsapp_available:
+          type: boolean
+          description: Zda je dostupný WhatsApp kanál
+        document_checksum:
+          type: string
+          nullable: true
+          description: SHA-256 checksum dokumentu
+
+    OtpSendResponseV2:
+      type: object
+      required: [status, channel, retry_after_seconds]
+      properties:
+        status:
+          type: string
+          enum: [otp_sent]
+        channel:
+          $ref: '#/components/schemas/OTPChannel'
+        retry_after_seconds:
+          type: integer
+          description: Sekund před dalším odesláním
+          example: 60
+
+    OtpVerifyResponseV2:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [verified]
+
+    SignCompleteResponse:
+      type: object
+      required: [status, signed_at]
+      properties:
+        status:
+          type: string
+          enum: [completed]
+        signed_pdf_url:
+          type: string
+          description: Signed URL pro stažení podepsaného PDF
+        signed_at:
+          type: string
+          format: date-time
+          description: Čas podpisu
+        message:
+          type: string
+          nullable: true
+          description: Volitelná zpráva (pro idempotentní odpovědi)
+
+    SignedStatusResponse:
+      type: object
+      required: [status]
+      description: |
+        Response pro GET /v1/signing/sessions/{token}/signed endpoint.
+        Používá se pro polling po async submit (202) nebo pro refresh download URL.
+      properties:
+        status:
+          type: string
+          enum: [signed, processing, failed]
+          description: |
+            - signed: Podpis dokončen, PDF dostupné
+            - processing: Stále se zpracovává (poll again)
+            - failed: Selhalo (retry možný)
+        signed_document_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Fresh signed URL pro stažení (TTL ~60 min).
+            Každý GET generuje nové URL - použijte při expiraci.
+        document_sha256:
+          type: string
+          nullable: true
+          description: SHA-256 hash podepsaného dokumentu
+        signed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Čas podpisu (UTC)
+        verification_id:
+          type: string
+          nullable: true
+          description: ID pro veřejnou verifikaci podpisu
+        failure_reason:
+          type: string
+          nullable: true
+          description: Důvod selhání (pokud status=failed)
+
+    SigningErrorResponse:
+      type: object
+      required: [error, code, message]
+      properties:
+        error:
+          type: boolean
+          default: true
+        code:
+          $ref: '#/components/schemas/SigningErrorCode'
+        message:
+          type: string
+          description: Lidsky čitelná chybová zpráva (CZ)
+        request_id:
+          type: string
+          format: uuid
+          description: Unique ID pro logování a support tickety
+        details:
+          type: object
+          additionalProperties: true
+          description: Field-level validační chyby nebo dodatečné info
+        remaining_attempts:
+          type: integer
+          nullable: true
+          description: Zbývající pokusy (pro OTP_INVALID)
+        retry_after_seconds:
+          type: integer
+          nullable: true
+          description: Sekund do dalšího pokusu
+        locked_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: Kdy skončí lock (pro OTP_TOO_MANY_ATTEMPTS)
+        expired_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Kdy token vypršel (pro SIGN_LINK_EXPIRED)
+        signed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Kdy byl podepsán (pro SIGN_ALREADY_COMPLETED)
+        signed_document_url:
+          type: string
+          format: uri
+          nullable: true
+          description: URL pro stažení (při SIGN_ALREADY_COMPLETED)
+
+    # Verification Responses
+    VerifyResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        verification_id:
+          type: string
+        document_id:
+          type: string
+          format: uuid
+        signer_name:
+          type: string
+        signed_at:
+          type: string
+          format: date-time
+        verification_method:
+          type: string
+        status:
+          type: string
+          enum: [valid, invalid, not_found, pending]
+        message:
+          type: string
+
+    VerifyHashResponse:
+      type: object
+      properties:
+        matches:
+          type: boolean
+        verification_id:
+          type: string
+        expected_hash:
+          type: string
+        provided_hash:
+          type: string
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: boolean
+          default: true
+        code:
+          type: string
+          description: Kód chyby (VALIDATION_ERROR, NOT_FOUND, RATE_LIMIT_EXCEEDED, ...)
+        message:
+          type: string
+        details:
+          type: object
+        request_id:
+          type: string
+          format: uuid
+
+  responses:
+    TokenNotFound:
+      description: Token not found or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SigningErrorResponse'
+          example:
+            error: true
+            code: "SIGN_LINK_INVALID"
+            message: "Tento odkaz pro podpis neexistuje nebo byl zneplatněn."
+
+    TokenExpired:
+      description: Token expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SigningErrorResponse'
+          example:
+            error: true
+            code: "SIGN_LINK_EXPIRED"
+            message: "Platnost odkazu pro podpis vypršela."
+
+paths:
+  # ============================================================================
+  # Health
+  # ============================================================================
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: Health check endpoint pro Cloud Run
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # ============================================================================
+  # Auth
+  # ============================================================================
+  /v1/auth/google:
+    post:
+      tags: [auth]
+      summary: Google OAuth2 token exchange
+      description: Vyměňuje OAuth2 authorization code za Google ID Token
+      operationId: authGoogle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthGoogleRequest'
+      responses:
+        '200':
+          description: Token exchange successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id_token:
+                    type: string
+                    description: Google ID Token pro další API volání
+                  user:
+                    $ref: '#/components/schemas/AuthenticatedUser'
+        '400':
+          description: Invalid authorization code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Users
+  # ============================================================================
+  /v1/me:
+    get:
+      tags: [users]
+      summary: Get current user
+      description: Vrací profil aktuálně přihlášeného uživatele
+      operationId: getMe
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthenticatedUser'
+        '401':
+          description: Invalid or missing token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Documents
+  # ============================================================================
+  /v1/documents:
+    get:
+      tags: [documents]
+      summary: List documents
+      description: Seznam dokumentů ve workspace s podporou stránkování a filtrování
+      operationId: listDocuments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/DocumentStatus'
+      responses:
+        '200':
+          description: List of documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      tags: [documents]
+      summary: Create document
+      description: |
+        Vytvoří nový dokument s definovanými podepisujícími.
+        Podporuje autentifikaci přes JWT nebo Admin Secret + User ID.
+      operationId: createDocument
+      security:
+        - BearerAuth: []
+        - AdminSecret: []
+          UserID: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentRequest'
+            example:
+              name: "Smlouva o dílo"
+              signers:
+                - name: "Jan Novák"
+                  email: "jan@example.com"
+                  phone: "+420123456789"
+                  signing_order: 1
+      responses:
+        '201':
+          description: Document created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{document_id}:
+    get:
+      tags: [documents]
+      summary: Get document
+      description: Vrací detail dokumentu včetně seznamu podepisujících
+      operationId: getDocument
+      security:
+        - BearerAuth: []
+        - AdminSecret: []
+          UserID: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{document_id}/upload-url:
+    post:
+      tags: [documents]
+      summary: Get upload URL
+      description: |
+        Generuje signed URL pro přímý upload souboru do GCS.
+        Frontend provede PUT request přímo na tuto URL s obsahem souboru.
+      operationId: createUploadUrl
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadUrlRequest'
+            example:
+              filename: "smlouva.docx"
+              content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      responses:
+        '200':
+          description: Upload URL generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadUrlResponse'
+        '400':
+          description: Unsupported content type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{document_id}/convert-to-pdf:
+    post:
+      tags: [documents]
+      summary: Convert to PDF
+      description: |
+        Konvertuje nahraný soubor na PDF pomocí LibreOffice.
+        Podporuje Word, Excel, PowerPoint, obrázky a další formáty.
+      operationId: convertToPdf
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConvertToPdfRequest'
+            example:
+              storage_path: "workspace-id/doc-id/uploads/smlouva.docx"
+              filename: "smlouva.docx"
+              content_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      responses:
+        '200':
+          description: Conversion successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConvertToPdfResponse'
+        '422':
+          description: Conversion error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{document_id}/send:
+    post:
+      tags: [documents]
+      summary: Send for signing
+      description: |
+        Odešle dokument k podpisu. Vytvoří signing sessions a magic linky pro každého podepisujícího.
+        Dokument musí mít PDF (tj. po convert-to-pdf).
+
+        Podporuje autentifikaci přes JWT nebo Admin Secret + User ID.
+
+        Idempotence: Při opakovaném volání invaliduje předchozí aktivní sessions.
+      operationId: sendDocument
+      security:
+        - BearerAuth: []
+        - AdminSecret: []
+          UserID: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendDocumentRequest'
+            examples:
+              basic:
+                summary: Basic send with email
+                value:
+                  send_email: true
+                  message: "Prosím o podpis smlouvy do 7 dnů."
+              dry_run:
+                summary: Dry run (no delivery)
+                value:
+                  send_email: false
+                  send_sms: false
+                  dry_run: true
+      responses:
+        '200':
+          description: Document sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendDocumentResponse'
+        '400':
+          description: Document has no PDF or no signers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{document_id}/download-links:
+    get:
+      tags: [documents]
+      summary: Get download links
+      description: Vrací signed download URLs pro všechny verze dokumentu
+      operationId: getDownloadLinks
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Download links
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DownloadLinksResponse'
+
+  /v1/documents/{document_id}/finalize:
+    post:
+      tags: [documents]
+      summary: Finalize document
+      description: |
+        Finalizuje dokument po podpisu všech podepisujících.
+        Generuje evidence report a označí dokument jako completed.
+      operationId: finalizeDocument
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: document_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizeResponse'
+        '400':
+          description: Not all signers have signed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Email
+  # ============================================================================
+  /v1/test-email:
+    post:
+      tags: [email]
+      summary: Send test email
+      description: Odešle testovací email se zvolenou šablonou
+      operationId: sendTestEmail
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-Workspace-ID
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: template_type
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/EmailTemplateType'
+        - name: to_email
+          in: query
+          required: true
+          schema:
+            type: string
+            format: email
+      responses:
+        '200':
+          description: Test email sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  message_id:
+                    type: string
+                  template_type:
+                    type: string
+        '500':
+          description: Failed to send email
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Public Signing API v2 (Recommended)
+  # ============================================================================
+  /v1/signing/sessions/{token}:
+    get:
+      tags: [signing]
+      summary: Get signing session metadata
+      description: |
+        Validuje token a vrací metadata pro podepisovací flow.
+
+        **Veřejný endpoint** - nevyžaduje autentifikaci.
+
+        Tento endpoint NIKDY nevrací 500 - všechny chyby vrací strukturované odpovědi:
+        - Valid token → 200 s session daty
+        - Invalid/unknown token → 404
+        - Expired token → 410
+        - Already signed → 409
+      operationId: getSigningSession
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Signing session token z emailového linku
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        '200':
+          description: Session is valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningSessionResponse'
+              example:
+                status: "valid"
+                document_name: "Smlouva o dílo"
+                signer_name: "Jan Novák"
+                signer_email_masked: "j***@gmail.com"
+                signer_phone_masked: "***6789"
+                expires_at: "2026-01-20T10:00:00Z"
+                expires_in_seconds: 604800
+                requires_otp: true
+                otp_status: "required"
+                pdf_preview_url: "https://storage.googleapis.com/..."
+                page_count: 5
+                sign_fields:
+                  - id: "sig_1"
+                    page: 5
+                    x: 120
+                    y: 640
+                    w: 180
+                    h: 50
+                whatsapp_available: true
+                document_checksum: "sha256:abc123..."
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '409':
+          description: Document already signed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "SIGN_ALREADY_COMPLETED"
+                message: "Tento dokument jste již podepsali."
+                signed_at: "2026-01-13T14:30:00Z"
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+
+  /v1/signing/sessions/{token}/otp/send:
+    post:
+      tags: [signing]
+      summary: Send OTP code
+      description: |
+        Odešle OTP kód přes SMS nebo WhatsApp.
+
+        Rate limits:
+        - Max 5 odeslání za hodinu
+        - 60 sekund cooldown mezi odesláním
+      operationId: sendOtpV2
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpSendRequestV2'
+            example:
+              channel: "whatsapp"
+      responses:
+        '200':
+          description: OTP sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpSendResponseV2'
+              example:
+                status: "otp_sent"
+                channel: "whatsapp"
+                retry_after_seconds: 60
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "TOO_MANY_REQUESTS"
+                message: "Příliš mnoho pokusů. Zkuste to znovu za 45 sekund."
+                retry_after_seconds: 45
+
+  /v1/signing/sessions/{token}/otp/verify:
+    post:
+      tags: [signing]
+      summary: Verify OTP code
+      description: |
+        Ověří OTP kód zadaný podepisujícím.
+
+        Rate limits:
+        - Max 5 neúspěšných pokusů
+        - Po 5 selháních: 15 minut lock
+      operationId: verifyOtpV2
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpVerifyRequestV2'
+            example:
+              code: "1234"
+      responses:
+        '200':
+          description: OTP verified successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpVerifyResponseV2'
+              example:
+                status: "verified"
+        '401':
+          description: Invalid OTP code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "OTP_INVALID"
+                message: "Zadaný kód není správný."
+                remaining_attempts: 3
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '429':
+          description: Too many failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "OTP_TOO_MANY_ATTEMPTS"
+                message: "Příliš mnoho neúspěšných pokusů. Zkuste to za 15 minut."
+                locked_until: "2026-01-13T15:45:00Z"
+
+  /v1/signing/sessions/{token}/complete:
+    post:
+      tags: [signing]
+      summary: Complete signature
+      description: |
+        Odešle podpis a dokončí podepisovací session.
+
+        **Prerekvizity:**
+        - OTP musí být ověřeno (pokud verification_method != "none")
+        - Podpisový obrázek musí být validní PNG (base64)
+        - consent_accepted musí být true
+
+        **Idempotence (DŮLEŽITÉ):**
+        - Vždy posílejte `Idempotency-Key` header (UUID v4)
+        - Při retry použijte STEJNÝ key → BE vrátí cached response
+        - FE by měl 409 SIGN_ALREADY_COMPLETED považovat za úspěch
+
+        **Response:**
+        - 200: Synchronně dokončeno, PDF ready
+        - 202: Přijato, zpracovává se → poll GET /signed
+        - 409: Již podepsáno nebo probíhá (FE = success pokud ALREADY_SIGNED)
+      operationId: completeSignature
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            UUID v4 pro deduplikaci submit requestů.
+            **Doporučení:** Vždy generovat před prvním submit a uložit do localStorage.
+            Při retry použít stejný key pro získání cached response.
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignCompleteRequest'
+            example:
+              signature_image_base64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+              field_id: "sig_1"
+              consent_accepted: true
+      responses:
+        '200':
+          description: Signature completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignCompleteResponse'
+              example:
+                status: "completed"
+                signed_pdf_url: "https://storage.googleapis.com/...signed.pdf"
+                signed_at: "2026-01-13T15:30:00Z"
+        '403':
+          description: OTP not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "OTP_NOT_VERIFIED"
+                message: "Ověření vypršelo. Prosím ověřte se znovu pomocí kódu."
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '409':
+          description: Already signed (idempotent - treat as success)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignCompleteResponse'
+              example:
+                status: "completed"
+                signed_pdf_url: "https://storage.googleapis.com/...signed.pdf"
+                signed_at: "2026-01-13T14:30:00Z"
+                message: "Dokument již byl podepsán."
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningErrorResponse'
+              example:
+                error: true
+                code: "VALIDATION_ERROR"
+                message: "Prosím nakreslete podpis a potvrďte souhlas."
+
+  /v1/signing/sessions/{token}/signed:
+    get:
+      tags: [signing]
+      summary: Get signed document status
+      description: |
+        Vrací aktuální status podepisování a fresh download URL.
+
+        **Použití:**
+        - Polling po 202 response z /complete (backoff: 1s, 2s, 4s, 8s, max 30s)
+        - Refresh expired download URL
+
+        **Poznámka:**
+        - Každý GET generuje fresh signed URL (TTL ~60 min)
+        - Pokud URL expiruje, stačí znovu zavolat tento endpoint
+      operationId: getSignedStatus
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Signing session token
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        '200':
+          description: Signed document status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedStatusResponse'
+              examples:
+                signed:
+                  summary: Document signed successfully
+                  value:
+                    status: "signed"
+                    signed_document_url: "https://storage.googleapis.com/...signed.pdf"
+                    document_sha256: "abc123def456..."
+                    signed_at: "2026-01-13T15:30:00Z"
+                    verification_id: "VRF-ABC123"
+                processing:
+                  summary: Still processing
+                  value:
+                    status: "processing"
+                failed:
+                  summary: Signing failed
+                  value:
+                    status: "failed"
+                    failure_reason: "PDF generation error"
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+
+  # ============================================================================
+  # Legacy Signing Sessions v1 (Deprecated - use /v1/signing/sessions instead)
+  # ============================================================================
+  /v1/signing-sessions/{token}/validate:
+    get:
+      tags: [signing-sessions]
+      summary: Validate signing session (legacy)
+      deprecated: true
+      description: |
+        Legacy endpoint - použijte GET /v1/signing/sessions/{token}.
+
+        Validuje magic link token a vrací informace o signing session.
+        Při prvním přístupu označí podepisujícího jako "viewed".
+      operationId: validateSession
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session validation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidateSessionResponse'
+
+  /v1/signing-sessions/{token}/otp/send:
+    post:
+      tags: [signing-sessions]
+      summary: Send OTP (legacy)
+      deprecated: true
+      description: |
+        Legacy endpoint - použijte POST /v1/signing/sessions/{token}/otp/send.
+
+        Odešle OTP kód na telefon podepisujícího.
+        Rate limit: Max 5 OTP za hodinu per session.
+      operationId: sendOtp
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendOTPRequest'
+      responses:
+        '200':
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPSendResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/signing-sessions/{token}/otp/verify:
+    post:
+      tags: [signing-sessions]
+      summary: Verify OTP (legacy)
+      deprecated: true
+      description: |
+        Legacy endpoint - použijte POST /v1/signing/sessions/{token}/otp/verify.
+
+        Ověří OTP kód zadaný podepisujícím.
+        Rate limit: Max 5 pokusů, poté 15min lock.
+      operationId: verifyOtp
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyOTPRequest'
+      responses:
+        '200':
+          description: OTP verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPVerifyResponse'
+
+  /v1/signing-sessions/{token}/sign:
+    post:
+      tags: [signing-sessions]
+      summary: Sign document (legacy)
+      deprecated: true
+      description: |
+        Legacy endpoint - použijte POST /v1/signing/sessions/{token}/complete.
+
+        Podepíše dokument obrázkem podpisu.
+        OTP musí být ověřeno a podepisující musí dát souhlas.
+      operationId: signDocument
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignRequest'
+      responses:
+        '200':
+          description: Document signed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResponse'
+        '403':
+          description: OTP not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ============================================================================
+  # Verification (Public)
+  # ============================================================================
+  /v1/verify/{verification_id}:
+    get:
+      tags: [verification]
+      summary: Verify signature
+      description: |
+        Veřejný endpoint pro ověření podpisu.
+        Uživatelé mohou naskenovat QR kód nebo zadat verification ID.
+
+        **Rate limit:** 10 požadavků/minutu per IP.
+      operationId: verifySignature
+      parameters:
+        - name: verification_id
+          in: path
+          required: true
+          description: Verification ID z QR kódu nebo razítka
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+              examples:
+                valid:
+                  summary: Valid signature
+                  value:
+                    valid: true
+                    verification_id: "ABC123"
+                    document_id: "uuid"
+                    signer_name: "Jan Novák"
+                    signed_at: "2024-01-01T14:00:00Z"
+                    verification_method: "sms"
+                    status: "valid"
+                    message: "Document signature verified."
+                not_found:
+                  summary: Not found
+                  value:
+                    valid: false
+                    verification_id: "XXX"
+                    status: "not_found"
+                    message: "Verification ID not found."
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/verify/{verification_id}/hash:
+    post:
+      tags: [verification]
+      summary: Verify document hash
+      description: |
+        Ověří integritu PDF souboru porovnáním SHA-256 hashe.
+
+        **Rate limit:** 10 požadavků/minutu per IP.
+      operationId: verifyDocumentHash
+      parameters:
+        - name: verification_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyHashRequest'
+            example:
+              file_hash: "a1b2c3d4e5f6789..."
+      responses:
+        '200':
+          description: Hash verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyHashResponse'
+              examples:
+                matches:
+                  summary: Hash matches
+                  value:
+                    matches: true
+                    verification_id: "ABC123"
+                    expected_hash: "a1b2c3..."
+                    provided_hash: "a1b2c3..."
+                    message: "Document hash matches - file is authentic."
+                mismatch:
+                  summary: Hash mismatch
+                  value:
+                    matches: false
+                    verification_id: "ABC123"
+                    expected_hash: "a1b2c3..."
+                    provided_hash: "x9y8z7..."
+                    message: "Document hash does NOT match - file may have been modified."
+        '404':
+          description: Verification ID not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'

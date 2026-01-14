@@ -1,0 +1,19 @@
+[
+  {
+    "origin": [
+      "https://drbacon.cz",
+      "https://podpisy.lovable.app",
+      "https://568552e5-4653-4c56-83ea-14ecd78a4cfb.lovableproject.com"
+    ],
+    "method": ["GET", "PUT", "POST", "DELETE", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "Content-Disposition",
+      "Cache-Control",
+      "x-goog-resumable",
+      "x-goog-meta-*"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

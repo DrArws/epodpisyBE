@@ -1,0 +1,11 @@
+TESTOVACÍ DOKUMENT
+
+Tento dokument slouží k otestování elektronického podpisu.
+
+Datum: 2026-01-13
+Verze: 1.0
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+
+--- KONEC DOKUMENTU ---

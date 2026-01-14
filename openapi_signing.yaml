@@ -1,0 +1,692 @@
+openapi: 3.0.3
+info:
+  title: E-Signing Service - Public Signing API
+  description: |
+    Public API for document signing flow. No authentication required - uses cryptographic tokens.
+
+    ## Flow Overview
+    1. Signer receives email with link: `https://podpisy.app/sign/{token}`
+    2. FE calls `GET /v1/signing/sessions/{token}` to get session metadata
+    3. If OTP required: `POST .../otp/send` → `POST .../otp/verify`
+    4. Display PDF, collect signature
+    5. `POST .../complete` to finalize
+
+    ## Security
+    - Token is cryptographically random (32+ bytes)
+    - BE stores only hash: `sha256(token + PEPPER)`
+    - Tokens expire after 7 days
+    - OTP rate limited (5 sends/hour, 5 verify attempts then 15min lock)
+  version: 2.0.0
+  contact:
+    name: E-Signing API Support
+
+servers:
+  - url: https://e-signing-service-526681856440.europe-west1.run.app
+    description: Production
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: signing
+    description: Public signing session endpoints (token-based, no auth)
+
+paths:
+  /v1/signing/sessions/{token}:
+    get:
+      operationId: getSigningSession
+      tags: [signing]
+      summary: Get signing session metadata
+      description: |
+        Validates token and returns session data for the signing flow.
+
+        **This endpoint NEVER returns 500** - all errors return structured responses.
+
+        Token lifecycle:
+        - Valid token → 200 with session data
+        - Invalid/unknown token → 404
+        - Expired token → 410
+        - Already signed → 409
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Signing session token from email link
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        '200':
+          description: Session is valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningSessionResponse'
+              example:
+                status: "valid"
+                document_name: "Smlouva o dílo"
+                signer_name: "Jan Novák"
+                signer_email_masked: "j***@gmail.com"
+                signer_phone_masked: "***6789"
+                expires_at: "2026-01-20T10:00:00Z"
+                expires_in_seconds: 604800
+                requires_otp: true
+                otp_status: "required"
+                pdf_preview_url: "https://storage.googleapis.com/bucket/...?X-Goog-Signature=..."
+                page_count: 5
+                sign_fields:
+                  - id: "sig_1"
+                    page: 5
+                    x: 120
+                    y: 640
+                    w: 180
+                    h: 50
+                whatsapp_available: true
+                document_checksum: "sha256:abc123def456..."
+        '404':
+          description: Token not found or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "SIGN_LINK_INVALID"
+                message: "Tento odkaz pro podpis neexistuje nebo byl zneplatněn."
+        '409':
+          description: Document already signed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "SIGN_ALREADY_COMPLETED"
+                message: "Tento dokument jste již podepsali."
+                signed_at: "2026-01-13T14:30:00Z"
+        '410':
+          description: Token expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "SIGN_LINK_EXPIRED"
+                message: "Platnost odkazu pro podpis vypršela."
+                expired_at: "2026-01-10T10:00:00Z"
+        '500':
+          description: Server error (should never happen - all errors are handled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "SERVER_ERROR"
+                message: "Něco se pokazilo. Zkuste to znovu."
+
+  /v1/signing/sessions/{token}/otp/send:
+    post:
+      operationId: sendOtp
+      tags: [signing]
+      summary: Send OTP code
+      description: |
+        Sends OTP verification code via SMS or WhatsApp.
+
+        Rate limits:
+        - Max 5 sends per hour
+        - 60 second cooldown between sends
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpSendRequest'
+            example:
+              channel: "whatsapp"
+      responses:
+        '200':
+          description: OTP sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpSendResponse'
+              example:
+                status: "otp_sent"
+                channel: "whatsapp"
+                retry_after_seconds: 60
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "TOO_MANY_REQUESTS"
+                message: "Příliš mnoho pokusů. Zkuste to znovu za 45 sekund."
+                retry_after_seconds: 45
+
+  /v1/signing/sessions/{token}/otp/verify:
+    post:
+      operationId: verifyOtp
+      tags: [signing]
+      summary: Verify OTP code
+      description: |
+        Verifies the OTP code entered by signer.
+
+        Rate limits:
+        - Max 5 failed attempts
+        - After 5 failures: 15 minute lockout
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpVerifyRequest'
+            example:
+              code: "1234"
+      responses:
+        '200':
+          description: OTP verified successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpVerifyResponse'
+              example:
+                status: "verified"
+        '401':
+          description: Invalid OTP code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "OTP_INVALID"
+                message: "Zadaný kód není správný."
+                remaining_attempts: 3
+        '403':
+          description: OTP verification required or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "OTP_NOT_VERIFIED"
+                message: "Prosím ověřte se znovu pomocí kódu."
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '429':
+          description: Too many failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "OTP_TOO_MANY_ATTEMPTS"
+                message: "Příliš mnoho neúspěšných pokusů. Zkuste to za 15 minut."
+                locked_until: "2026-01-13T15:45:00Z"
+
+  /v1/signing/sessions/{token}/complete:
+    post:
+      operationId: completeSignature
+      tags: [signing]
+      summary: Complete signature
+      description: |
+        Submits the signature and finalizes the signing session.
+
+        Requirements:
+        - OTP must be verified (if required)
+        - Signature image must be valid PNG
+        - Consent must be accepted
+
+        **Idempotency (DŮLEŽITÉ):**
+        - Vždy posílejte `Idempotency-Key` header (UUID v4)
+        - Při retry použijte STEJNÝ key → BE vrátí cached response
+        - FE by měl 409 SIGN_ALREADY_COMPLETED považovat za úspěch
+
+        **Response:**
+        - 200: Synchronně dokončeno, PDF ready
+        - 202: Přijato, zpracovává se → poll GET /signed
+        - 409: Již podepsáno nebo probíhá (FE = success pokud ALREADY_SIGNED)
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            UUID v4 pro deduplikaci submit requestů.
+            Doporučení: Vždy generovat před prvním submit a uložit do localStorage.
+            Při retry použít stejný key pro získání cached response.
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignCompleteRequest'
+            example:
+              signature_image_base64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+              field_id: "sig_1"
+              consent_accepted: true
+      responses:
+        '200':
+          description: Signature completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignCompleteResponse'
+              example:
+                status: "completed"
+                signed_pdf_url: "https://storage.googleapis.com/bucket/...signed.pdf?..."
+                signed_at: "2026-01-13T15:30:00Z"
+        '403':
+          description: OTP not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "OTP_NOT_VERIFIED"
+                message: "Ověření vypršelo. Prosím ověřte se znovu pomocí kódu."
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '409':
+          description: Already signed (idempotent - treat as success)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignCompleteResponse'
+              example:
+                status: "completed"
+                signed_pdf_url: "https://storage.googleapis.com/bucket/...signed.pdf?..."
+                signed_at: "2026-01-13T14:30:00Z"
+                message: "Dokument již byl podepsán."
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SigningError'
+              example:
+                error: true
+                code: "VALIDATION_ERROR"
+                message: "Prosím nakreslete podpis a potvrďte souhlas."
+                details:
+                  signature: "Podpis je povinný"
+                  consent: "Souhlas je povinný"
+
+  /v1/signing/sessions/{token}/signed:
+    get:
+      operationId: getSignedStatus
+      tags: [signing]
+      summary: Get signed document status
+      description: |
+        Vrací aktuální status podepisování a fresh download URL.
+
+        **Použití:**
+        - Polling po 202 response z /complete (backoff: 1s, 2s, 4s, 8s, max 30s)
+        - Refresh expired download URL
+
+        **Poznámka:**
+        - Každý GET generuje fresh signed URL (TTL ~60 min)
+        - Pokud URL expiruje, stačí znovu zavolat tento endpoint
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Signing session token
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        '200':
+          description: Signed document status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedStatusResponse'
+              examples:
+                signed:
+                  summary: Document signed successfully
+                  value:
+                    status: "signed"
+                    signed_document_url: "https://storage.googleapis.com/...signed.pdf"
+                    document_sha256: "abc123def456..."
+                    signed_at: "2026-01-13T15:30:00Z"
+                    verification_id: "VRF-ABC123"
+                processing:
+                  summary: Still processing
+                  value:
+                    status: "processing"
+                failed:
+                  summary: Signing failed
+                  value:
+                    status: "failed"
+                    failure_reason: "PDF generation error"
+        '404':
+          $ref: '#/components/responses/TokenNotFound'
+        '410':
+          $ref: '#/components/responses/TokenExpired'
+
+components:
+  schemas:
+    SigningSessionResponse:
+      type: object
+      required:
+        - status
+        - document_name
+        - signer_name
+        - expires_at
+        - expires_in_seconds
+        - requires_otp
+        - otp_status
+        - whatsapp_available
+      properties:
+        status:
+          type: string
+          enum: [valid]
+          description: Session status
+        document_name:
+          type: string
+          description: Name of the document to sign
+          example: "Smlouva o dílo"
+        signer_name:
+          type: string
+          description: Name of the signer
+          example: "Jan Novák"
+        signer_email_masked:
+          type: string
+          nullable: true
+          description: Masked email for display
+          example: "j***@gmail.com"
+        signer_phone_masked:
+          type: string
+          nullable: true
+          description: Masked phone for display (last 4 digits)
+          example: "***6789"
+        expires_at:
+          type: string
+          format: date-time
+          description: When the signing session expires
+        expires_in_seconds:
+          type: integer
+          description: Seconds until session expires
+          example: 604800
+        requires_otp:
+          type: boolean
+          description: Whether OTP verification is required
+        otp_status:
+          type: string
+          enum: [not_required, required, sent, verified]
+          description: Current OTP verification status
+        pdf_preview_url:
+          type: string
+          nullable: true
+          description: Signed URL for PDF preview (TTL ~10 min)
+        page_count:
+          type: integer
+          nullable: true
+          description: Number of pages in the document
+        sign_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignField'
+          description: Signature placement fields
+        whatsapp_available:
+          type: boolean
+          description: Whether WhatsApp OTP channel is available
+        document_checksum:
+          type: string
+          nullable: true
+          description: SHA-256 checksum of the document
+          example: "sha256:abc123def456..."
+
+    SignField:
+      type: object
+      required: [id, page, x, y, w, h]
+      properties:
+        id:
+          type: string
+          description: Unique field identifier
+          example: "sig_1"
+        page:
+          type: integer
+          minimum: 1
+          description: Page number (1-indexed)
+        x:
+          type: number
+          description: X coordinate in PDF points from left
+        y:
+          type: number
+          description: Y coordinate in PDF points from bottom
+        w:
+          type: number
+          description: Width in PDF points
+        h:
+          type: number
+          description: Height in PDF points
+
+    OtpSendRequest:
+      type: object
+      required: [channel]
+      properties:
+        channel:
+          type: string
+          enum: [sms, whatsapp]
+          description: OTP delivery channel
+
+    OtpSendResponse:
+      type: object
+      required: [status, channel, retry_after_seconds]
+      properties:
+        status:
+          type: string
+          enum: [otp_sent]
+        channel:
+          type: string
+          enum: [sms, whatsapp]
+        retry_after_seconds:
+          type: integer
+          description: Seconds before resend is allowed
+          example: 60
+
+    OtpVerifyRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 4
+          maxLength: 6
+          pattern: "^[0-9]+$"
+          description: OTP code
+          example: "1234"
+
+    OtpVerifyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [verified]
+
+    SignCompleteRequest:
+      type: object
+      required: [signature_image_base64, consent_accepted]
+      properties:
+        signature_image_base64:
+          type: string
+          description: Base64 encoded PNG image of signature
+          example: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+        field_id:
+          type: string
+          description: ID of the sign field (from sign_fields array)
+          example: "sig_1"
+        consent_accepted:
+          type: boolean
+          description: User must accept consent to sign
+
+    SignCompleteResponse:
+      type: object
+      required: [status, signed_at]
+      properties:
+        status:
+          type: string
+          enum: [completed]
+        signed_pdf_url:
+          type: string
+          description: Signed URL to download the signed PDF
+        signed_at:
+          type: string
+          format: date-time
+          description: Timestamp when document was signed
+        message:
+          type: string
+          nullable: true
+          description: Optional message (e.g., for idempotent responses)
+
+    SignedStatusResponse:
+      type: object
+      required: [status]
+      description: |
+        Response pro GET /v1/signing/sessions/{token}/signed endpoint.
+        Používá se pro polling po async submit (202) nebo pro refresh download URL.
+      properties:
+        status:
+          type: string
+          enum: [signed, processing, failed]
+          description: |
+            - signed: Podpis dokončen, PDF dostupné
+            - processing: Stále se zpracovává (poll again)
+            - failed: Selhalo (retry možný)
+        signed_document_url:
+          type: string
+          format: uri
+          nullable: true
+          description: |
+            Fresh signed URL pro stažení (TTL ~60 min).
+            Každý GET generuje nové URL - použijte při expiraci.
+        document_sha256:
+          type: string
+          nullable: true
+          description: SHA-256 hash podepsaného dokumentu
+        signed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Čas podpisu (UTC)
+        verification_id:
+          type: string
+          nullable: true
+          description: ID pro veřejnou verifikaci podpisu
+        failure_reason:
+          type: string
+          nullable: true
+          description: Důvod selhání (pokud status=failed)
+
+    SigningError:
+      type: object
+      required: [error, code, message]
+      properties:
+        error:
+          type: boolean
+          default: true
+        code:
+          type: string
+          enum:
+            - SIGN_LINK_INVALID
+            - SIGN_LINK_EXPIRED
+            - SIGN_ALREADY_COMPLETED
+            - OTP_NOT_VERIFIED
+            - OTP_INVALID
+            - TOO_MANY_REQUESTS
+            - OTP_TOO_MANY_ATTEMPTS
+            - VALIDATION_ERROR
+            - SERVER_ERROR
+          description: Error code for FE state machine
+        message:
+          type: string
+          description: Human-readable error message (CZ)
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: Field-level validation errors
+        remaining_attempts:
+          type: integer
+          nullable: true
+          description: Remaining OTP attempts (for OTP_INVALID)
+        retry_after_seconds:
+          type: integer
+          nullable: true
+          description: Seconds until retry allowed (for rate limits)
+        locked_until:
+          type: string
+          format: date-time
+          nullable: true
+          description: When lockout expires (for OTP_TOO_MANY_ATTEMPTS)
+        expired_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When token expired (for SIGN_LINK_EXPIRED)
+        signed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When signed (for SIGN_ALREADY_COMPLETED)
+
+  responses:
+    TokenNotFound:
+      description: Token not found or invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SigningError'
+          example:
+            error: true
+            code: "SIGN_LINK_INVALID"
+            message: "Tento odkaz pro podpis neexistuje nebo byl zneplatněn."
+
+    TokenExpired:
+      description: Token expired
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SigningError'
+          example:
+            error: true
+            code: "SIGN_LINK_EXPIRED"
+            message: "Platnost odkazu pro podpis vypršela."

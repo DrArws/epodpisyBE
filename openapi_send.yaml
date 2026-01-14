@@ -1,0 +1,416 @@
+openapi: 3.0.3
+info:
+  title: E-Signing API - Send Document
+  description: |
+    OpenAPI kontrakt pro odesílání dokumentů k podpisu.
+
+    ## Klíčové principy
+    - Backend VŽDY generuje absolutní podpisový URL z `SIGN_APP_URL` ENV proměnné
+    - Frontend email šablona jen renderuje `{{sign_url}}` - nikdy URL neskladá
+    - Token je kryptograficky bezpečný (32 bytes, `secrets.token_urlsafe`)
+    - V DB je uložen pouze SHA-256 hash tokenu (nikdy plaintext)
+  version: 1.0.0
+  contact:
+    name: E-Signing Team
+
+servers:
+  - url: https://api.sign.arws.cz/v1
+    description: Production
+  - url: http://localhost:8000/v1
+    description: Local development
+
+tags:
+  - name: documents
+    description: Document operations
+  - name: signing
+    description: Signing session operations (public, unauthenticated)
+
+paths:
+  /documents/{document_id}/send:
+    post:
+      summary: Send document for signing
+      description: |
+        Vytvoří signing sessions pro všechny nepodepsané signatáře a volitelně odešle email/SMS.
+
+        **Důležité:**
+        - Backend generuje absolutní `sign_url` z `SIGN_APP_URL` ENV
+        - Frontend NIKDY nevidí localhost v produkci
+        - Tokeny jsou jednorázové s 7denní expirací
+      operationId: sendDocument
+      tags:
+        - documents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          description: UUID dokumentu
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendDocumentRequest"
+            examples:
+              basic:
+                summary: Basic send with email
+                value:
+                  send_email: true
+                  message: "Prosím o podpis smlouvy do 7 dnů."
+              dry_run:
+                summary: Dry run (no delivery)
+                value:
+                  send_email: false
+                  send_sms: false
+                  dry_run: true
+              with_sms:
+                summary: Send via email and SMS
+                value:
+                  send_email: true
+                  send_sms: true
+                  message: "Urgentní - prosím podepište dnes."
+      responses:
+        "200":
+          description: Document sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendDocumentResponse"
+        "400":
+          description: Validation error (no signers, document not ready)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+        "403":
+          description: Forbidden (wrong workspace)
+        "404":
+          description: Document not found
+        "500":
+          description: Server error
+
+  /signing/sessions/{token}:
+    get:
+      summary: Get signing session metadata (public)
+      description: |
+        Vrátí metadata signing session včetně dokumentu, OTP statusu a PDF preview URL.
+
+        **Tento endpoint je veřejný** - nepotřebuje autentizaci.
+        Token v URL je jediná autorizace.
+      operationId: getSigningSession
+      tags:
+        - signing
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Podpisový token z emailu
+          schema:
+            type: string
+            minLength: 32
+      responses:
+        "200":
+          description: Session info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SigningSessionPublic"
+        "404":
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Already signed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: Session expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # Legacy endpoint (deprecated)
+  /signing-sessions/{token}/validate:
+    get:
+      summary: "[DEPRECATED] Validate signing session"
+      deprecated: true
+      description: |
+        **DEPRECATED** - Použijte `GET /signing/sessions/{token}` místo tohoto endpointu.
+      operationId: validateSigningSessionLegacy
+      tags:
+        - signing
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SigningSessionPublic"
+        "404":
+          description: Session not found or expired
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Google ID Token
+
+  schemas:
+    # ========================================
+    # REQUEST MODELS
+    # ========================================
+
+    SendDocumentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: Volitelná zpráva vložená do emailu
+          example: "Prosím o podpis smlouvy do 7 dnů."
+        send_email:
+          type: boolean
+          default: true
+          description: Odeslat podpisový link emailem
+        send_sms:
+          type: boolean
+          default: false
+          description: Odeslat podpisový link SMS (vyžaduje phone u signatářů)
+        dry_run:
+          type: boolean
+          default: false
+          description: |
+            Pouze vytvořit sessions a vrátit URLs, bez odeslání zpráv.
+            Užitečné pro testování nebo admin preview.
+
+    # ========================================
+    # RESPONSE MODELS
+    # ========================================
+
+    SendDocumentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - message
+        - document_id
+        - document_name
+        - signers
+        - delivery
+      properties:
+        success:
+          type: boolean
+          description: Zda operace proběhla úspěšně
+        message:
+          type: string
+          description: Lidsky čitelná zpráva
+          example: "Document sent for signing"
+        document_id:
+          type: string
+          format: uuid
+        document_name:
+          type: string
+          example: "Smlouva_2025.pdf"
+        signers:
+          type: array
+          description: Seznam signatářů s podpisovými linky
+          items:
+            $ref: "#/components/schemas/SignerResult"
+        delivery:
+          $ref: "#/components/schemas/DeliverySummary"
+
+    SignerResult:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - sign_url
+        - expires_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Signer ID
+        name:
+          type: string
+          example: "Jan Novák"
+        email:
+          type: string
+          format: email
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+          description: E.164 format
+          example: "+420777123456"
+        sign_url:
+          type: string
+          format: uri
+          description: |
+            **Absolutní podpisový URL generovaný backendem.**
+            Nikdy není localhost v produkci.
+          example: "https://sign.arws.cz/sign/suWuP4dp2wbMhPL2frC3_b0cInaXvpT..."
+        expires_at:
+          type: string
+          format: date-time
+          description: Kdy vyprší platnost linku (UTC)
+        email_delivery:
+          $ref: "#/components/schemas/DeliveryAttempt"
+        sms_delivery:
+          $ref: "#/components/schemas/DeliveryAttempt"
+
+    DeliveryAttempt:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - status
+      properties:
+        enabled:
+          type: boolean
+          description: Zda byl tento kanál požadován
+        status:
+          type: string
+          enum:
+            - not_sent
+            - sent
+            - failed
+            - skipped
+          description: |
+            - `not_sent`: Nebylo požadováno nebo dry_run
+            - `sent`: Úspěšně odesláno
+            - `failed`: Pokus selhal
+            - `skipped`: Přeskočeno (chybí email/phone)
+        provider_message_id:
+          type: string
+          nullable: true
+          description: ID zprávy od providera (Resend, Twilio)
+        error:
+          type: string
+          nullable: true
+          description: Chybová zpráva pokud status=failed
+
+    DeliverySummary:
+      type: object
+      additionalProperties: false
+      required:
+        - send_email
+        - send_sms
+        - dry_run
+        - emails_sent
+        - emails_failed
+        - sms_sent
+        - sms_failed
+      properties:
+        send_email:
+          type: boolean
+        send_sms:
+          type: boolean
+        dry_run:
+          type: boolean
+        emails_sent:
+          type: integer
+          minimum: 0
+        emails_failed:
+          type: integer
+          minimum: 0
+        sms_sent:
+          type: integer
+          minimum: 0
+        sms_failed:
+          type: integer
+          minimum: 0
+
+    SigningSessionPublic:
+      type: object
+      additionalProperties: false
+      required:
+        - valid
+        - document_id
+        - document_name
+        - signer_name
+        - expires_at
+        - requires_otp
+      properties:
+        valid:
+          type: boolean
+          description: Zda je session platná
+        document_id:
+          type: string
+          format: uuid
+        document_name:
+          type: string
+          example: "Smlouva_2025.pdf"
+        signer_name:
+          type: string
+          example: "Jan Novák"
+        signer_email_masked:
+          type: string
+          nullable: true
+          description: Maskovaný email pro UI
+          example: "j***@example.com"
+        expires_at:
+          type: string
+          format: date-time
+        requires_otp:
+          type: boolean
+          description: Zda je vyžadováno OTP ověření
+        otp_verified:
+          type: boolean
+          default: false
+          description: Zda již bylo OTP ověřeno
+        pdf_download_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Signed URL pro stažení PDF (dostupné po OTP)
+        page_count:
+          type: integer
+          nullable: true
+          minimum: 1
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - code
+        - message
+      properties:
+        error:
+          type: boolean
+          default: true
+        code:
+          type: string
+          description: Strojově čitelný kód chyby
+          example: "SESSION_EXPIRED"
+        message:
+          type: string
+          description: Lidsky čitelná zpráva
+          example: "Podpisový link vypršel. Požádejte o nový."
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
