@@ -576,15 +576,6 @@ public class Main {
                 LOG.error("VALIDATION_FAIL: Signature integrity check failed! indication={}, subIndication={}",
                     indication, subIndicationStr);
 
-                // Try to get more details from the detailed report
-                try {
-                    eu.europa.esig.dss.detailedreport.DetailedReport detailedReport = reports.getDetailedReport();
-                    String conclusion = detailedReport.getBasicBuildingBlocksSignatureConclusion(signatureId);
-                    LOG.error("VALIDATION_FAIL: BBB conclusion: {}", conclusion);
-                } catch (Exception detailEx) {
-                    LOG.warn("Could not extract detailed report info: {}", detailEx.getMessage());
-                }
-
                 audit.addError("VALIDATION_ERROR: Signature integrity failed (indication=" + indication +
                     ", subIndication=" + subIndicationStr + ")");
             }
@@ -627,16 +618,6 @@ public class Main {
 
             if (indication == Indication.TOTAL_FAILED) {
                 LOG.error("PRE_FLIGHT: TOTAL_FAILED - subIndication={}", subIndication);
-
-                // Dump more diagnostic info
-                try {
-                    eu.europa.esig.dss.detailedreport.DetailedReport detailedReport = reports.getDetailedReport();
-                    LOG.error("PRE_FLIGHT: Detailed conclusion: {}",
-                        detailedReport.getBasicBuildingBlocksSignatureConclusion(signatureId));
-                } catch (Exception ex) {
-                    LOG.warn("PRE_FLIGHT: Could not get detailed report: {}", ex.getMessage());
-                }
-
                 return false;
             }
 
