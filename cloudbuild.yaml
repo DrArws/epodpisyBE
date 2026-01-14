@@ -1,36 +1,40 @@
 options:
   logging: CLOUD_LOGGING_ONLY
 
+# Configuration matching golden_deploy.sh
+substitutions:
+  _REGION: europe-west1
+  _SERVICE: e-signing-service
+  _IMAGE_REPO: gcr.io/$PROJECT_ID/e-signing-service
+
 steps:
+  # Build and push image using Cloud Build
   - name: 'gcr.io/cloud-builders/docker'
     args:
-      [
-        'build',
-        '-t',
-        'europe-west1-docker.pkg.dev/$PROJECT_ID/esign-repo/e-signing-service:$COMMIT_SHA',
-        '.'
-      ]
+      - 'build'
+      - '-t'
+      - '${_IMAGE_REPO}:$COMMIT_SHA'
+      - '.'
 
   - name: 'gcr.io/cloud-builders/docker'
     args:
-      [
-        'push',
-        'europe-west1-docker.pkg.dev/$PROJECT_ID/esign-repo/e-signing-service:$COMMIT_SHA'
-      ]
+      - 'push'
+      - '${_IMAGE_REPO}:$COMMIT_SHA'
 
+  # Deploy to Cloud Run with all secrets from golden_deploy.sh
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'e-signing-service'
-      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/esign-repo/e-signing-service:$COMMIT_SHA'
-      - '--region=europe-west1'
-      - '--platform=managed'
-      - '--service-account=e-signing-runtime@baconauth.iam.gserviceaccount.com'
+      - '${_SERVICE}'
+      - '--region=${_REGION}'
+      - '--image=${_IMAGE_REPO}:$COMMIT_SHA'
       - '--allow-unauthenticated'
-      - '--update-env-vars=ALLOWED_ORIGINS=https://drbacon.cz;https://podpisy.lovable.app'
+      - '--execution-environment=gen2'
+      - '--set-secrets=ADMIN_API_SECRET=ADMIN_API_SECRET:latest,GCS_BUCKET=GCS_BUCKET:latest,KMS_KEY_NAME=KMS_KEY_NAME:latest,OAUTH_CLIENT_ID=OAUTH_CLIENT_ID:latest,OAUTH_CLIENT_SECRET=OAUTH_CLIENT_SECRET:latest,RESEND_API_KEY=RESEND_API_KEY:latest,SIGNING_TOKEN_SALT=SIGNING_TOKEN_SALT:latest,SIGN_APP_URL=SIGN_APP_URL:latest,SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest,SUPABASE_JWT_SECRET=SUPABASE_JWT_SECRET:latest,SUPABASE_URL=SUPABASE_URL:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_VERIFY_SERVICE_SID=TWILIO_VERIFY_SERVICE_SID:latest'
+      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,ENVIRONMENT=production,ALLOWED_ORIGINS=https://drbacon.cz;https://podpisy.lovable.app'
       - '--quiet'
 
 images:
-  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/esign-repo/e-signing-service:$COMMIT_SHA'
+  - '${_IMAGE_REPO}:$COMMIT_SHA'
