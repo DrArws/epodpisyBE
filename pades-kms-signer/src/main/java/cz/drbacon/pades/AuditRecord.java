@@ -37,6 +37,18 @@ public class AuditRecord {
     @JsonProperty("tsa_url")
     private String tsaUrl;
 
+    @JsonProperty("tsa_url_used")
+    private String tsaUrlUsed;
+
+    @JsonProperty("tsa_fallback_url")
+    private String tsaFallbackUrl;
+
+    @JsonProperty("tsa_fallback_used")
+    private Boolean tsaFallbackUsed;
+
+    @JsonProperty("tsa_qualified")
+    private Boolean tsaQualified;
+
     @JsonProperty("tsa_token_time")
     private Instant tsaTokenTime;
 
@@ -159,6 +171,38 @@ public class AuditRecord {
 
     public void setTsaUrl(String tsaUrl) {
         this.tsaUrl = tsaUrl;
+    }
+
+    public String getTsaUrlUsed() {
+        return tsaUrlUsed;
+    }
+
+    public void setTsaUrlUsed(String tsaUrlUsed) {
+        this.tsaUrlUsed = tsaUrlUsed;
+    }
+
+    public String getTsaFallbackUrl() {
+        return tsaFallbackUrl;
+    }
+
+    public void setTsaFallbackUrl(String tsaFallbackUrl) {
+        this.tsaFallbackUrl = tsaFallbackUrl;
+    }
+
+    public Boolean getTsaFallbackUsed() {
+        return tsaFallbackUsed;
+    }
+
+    public void setTsaFallbackUsed(Boolean tsaFallbackUsed) {
+        this.tsaFallbackUsed = tsaFallbackUsed;
+    }
+
+    public Boolean getTsaQualified() {
+        return tsaQualified;
+    }
+
+    public void setTsaQualified(Boolean tsaQualified) {
+        this.tsaQualified = tsaQualified;
     }
 
     public Instant getTsaTokenTime() {

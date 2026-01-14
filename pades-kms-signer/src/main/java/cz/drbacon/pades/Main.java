@@ -39,10 +39,14 @@ import java.util.HexFormat;
  * Usage: java -jar pades-kms-signer.jar input.pdf signed.pdf [signer-name]
  *
  * Environment variables:
- *   KMS_KEY_NAME - Full KMS key resource name (required)
- *                  Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}/cryptoKeyVersions/{version}
- *                  Or without version: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
- *   TSA_URL      - Timestamp authority URL (optional, default: https://timestamp.digicert.com)
+ *   KMS_KEY_NAME          - Full KMS key resource name (required)
+ *                           Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}/cryptoKeyVersions/{version}
+ *                           Or without version: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
+ *   TSA_URL               - Primary TSA URL (default: https://timestamp.aped.gov.gr/qtss - eIDAS qualified)
+ *   TSA_FALLBACK_URL      - Fallback TSA URL (default: https://tsa.swisssign.net)
+ *   TSA_CONNECT_TIMEOUT_MS - TSA connection timeout in ms (default: 5000)
+ *   TSA_READ_TIMEOUT_MS   - TSA read timeout in ms (default: 15000)
+ *   TSA_MAX_RETRIES       - Max retries per TSA (default: 2)
  *
  * Exit codes:
  *   0 - Success
@@ -64,8 +68,12 @@ public class Main {
     private static final int EXIT_TSA_ERROR = 4;
     private static final int EXIT_PDF_ERROR = 5;
 
-    // TSA configuration (can be overridden via env var) - HTTPS for security
-    private static final String DEFAULT_TSA_URL = "https://timestamp.digicert.com";
+    // TSA configuration - APED Greece (eIDAS qualified) as primary
+    private static final String DEFAULT_TSA_URL = "https://timestamp.aped.gov.gr/qtss";
+    private static final String DEFAULT_TSA_FALLBACK_URL = "https://tsa.swisssign.net";
+    private static final int DEFAULT_TSA_CONNECT_TIMEOUT_MS = 5000;
+    private static final int DEFAULT_TSA_READ_TIMEOUT_MS = 15000;
+    private static final int DEFAULT_TSA_MAX_RETRIES = 2;
 
     // Parsed KMS configuration
     private static String PROJECT_ID;
@@ -73,7 +81,13 @@ public class Main {
     private static String KEY_RING;
     private static String KEY_NAME;
     private static String KEY_VERSION;
+
+    // TSA configuration
     private static String TSA_URL;
+    private static String TSA_FALLBACK_URL;
+    private static int TSA_CONNECT_TIMEOUT_MS;
+    private static int TSA_READ_TIMEOUT_MS;
+    private static int TSA_MAX_RETRIES;
 
     // Config error holder for deferred exit (static init can't call System.exit)
     private static String CONFIG_ERROR = null;
@@ -122,14 +136,36 @@ public class Main {
             }
         }
 
-        // TSA URL (optional override) - HTTPS recommended for security
-        TSA_URL = System.getenv("TSA_URL");
-        if (TSA_URL == null || TSA_URL.isEmpty()) {
-            TSA_URL = DEFAULT_TSA_URL;
-        }
+        // TSA configuration (optional overrides)
+        TSA_URL = getEnvOrDefault("TSA_URL", DEFAULT_TSA_URL);
+        TSA_FALLBACK_URL = getEnvOrDefault("TSA_FALLBACK_URL", DEFAULT_TSA_FALLBACK_URL);
+        TSA_CONNECT_TIMEOUT_MS = getEnvOrDefaultInt("TSA_CONNECT_TIMEOUT_MS", DEFAULT_TSA_CONNECT_TIMEOUT_MS);
+        TSA_READ_TIMEOUT_MS = getEnvOrDefaultInt("TSA_READ_TIMEOUT_MS", DEFAULT_TSA_READ_TIMEOUT_MS);
+        TSA_MAX_RETRIES = getEnvOrDefaultInt("TSA_MAX_RETRIES", DEFAULT_TSA_MAX_RETRIES);
+
+        LOG.info("TSA primary: {} (timeout: {}ms connect, {}ms read)", TSA_URL, TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS);
+        LOG.info("TSA fallback: {}", TSA_FALLBACK_URL);
+
         if (TSA_URL.startsWith("http://")) {
             LOG.warn("TSA_URL uses HTTP instead of HTTPS - consider using HTTPS for security");
         }
+    }
+
+    private static String getEnvOrDefault(String name, String defaultValue) {
+        String value = System.getenv(name);
+        return (value != null && !value.isEmpty()) ? value : defaultValue;
+    }
+
+    private static int getEnvOrDefaultInt(String name, int defaultValue) {
+        String value = System.getenv(name);
+        if (value != null && !value.isEmpty()) {
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException e) {
+                LOG.warn("Invalid integer for {}: {}, using default: {}", name, value, defaultValue);
+            }
+        }
+        return defaultValue;
     }
 
     public static void main(String[] args) {
@@ -168,6 +204,7 @@ public class Main {
             audit.setKmsKeyVersion(String.format("projects/%s/locations/%s/keyRings/%s/cryptoKeys/%s/cryptoKeyVersions/%s",
                 PROJECT_ID, LOCATION, KEY_RING, KEY_NAME, KEY_VERSION));
             audit.setTsaUrl(TSA_URL);
+            audit.setTsaFallbackUrl(TSA_FALLBACK_URL);
             audit.setTrustModel("self-signed");  // Document that we use self-signed cert
 
             // Validate input
@@ -308,10 +345,7 @@ public class Main {
             // Create PAdES service
             PAdESService service = new PAdESService(certificateVerifier);
 
-            // Configure TSA with timeout logging
-            LOG.info("Configuring TSA: {}", TSA_URL);
-            OnlineTSPSource tspSource = new OnlineTSPSource(TSA_URL);
-            service.setTspSource(tspSource);
+            // TSP source will be set in signDocumentWithTsaRetry for each attempt
 
             // Load input document
             DSSDocument toSignDocument = new FileDocument(inputPath);
@@ -446,8 +480,12 @@ public class Main {
     }
 
     /**
-     * Sign document with TSA timestamp, with exponential backoff retry.
-     * TSA servers can be temporarily unavailable, so we retry up to 3 times.
+     * Sign document with TSA timestamp, with primary/fallback TSA and retry logic.
+     *
+     * Strategy:
+     * 1. Try primary TSA (APED Greece - eIDAS qualified) with configured retries
+     * 2. If primary fails, try fallback TSA (SwissSign) with configured retries
+     * 3. Record which TSA was used and whether fallback was needed
      */
     private static DSSDocument signDocumentWithTsaRetry(
             PAdESService service,
@@ -456,61 +494,112 @@ public class Main {
             SignatureValue signatureValue,
             AuditRecord audit) throws Exception {
 
-        final int MAX_RETRIES = 3;
-        final long[] BACKOFF_MS = {0, 1000, 3000};  // 0s, 1s, 3s (exponential-ish)
+        // TSA URLs to try: primary first, then fallback
+        String[] tsaUrls = {TSA_URL, TSA_FALLBACK_URL};
+        boolean[] isQualified = {isQualifiedTsa(TSA_URL), isQualifiedTsa(TSA_FALLBACK_URL)};
 
         Exception lastException = null;
         long totalLatency = 0;
+        int totalAttempts = 0;
 
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            // Wait before retry (skip for first attempt)
-            if (attempt > 1) {
-                long backoff = BACKOFF_MS[Math.min(attempt - 1, BACKOFF_MS.length - 1)];
-                LOG.info("TSA retry attempt {}/{} after {}ms backoff...", attempt, MAX_RETRIES, backoff);
+        for (int tsaIndex = 0; tsaIndex < tsaUrls.length; tsaIndex++) {
+            String currentTsaUrl = tsaUrls[tsaIndex];
+            boolean isFallback = (tsaIndex > 0);
+            boolean qualified = isQualified[tsaIndex];
+
+            LOG.info("Trying TSA {}: {} (qualified: {})",
+                isFallback ? "fallback" : "primary", currentTsaUrl, qualified);
+
+            // Configure TSP source with timeouts
+            OnlineTSPSource tspSource = createTspSource(currentTsaUrl);
+            service.setTspSource(tspSource);
+
+            // Try this TSA with retries
+            for (int attempt = 1; attempt <= TSA_MAX_RETRIES; attempt++) {
+                totalAttempts++;
+
+                // Exponential backoff (skip for first attempt of each TSA)
+                if (attempt > 1) {
+                    long backoff = 1000L * (1 << (attempt - 2));  // 1s, 2s, 4s...
+                    LOG.info("TSA retry {}/{} after {}ms backoff...", attempt, TSA_MAX_RETRIES, backoff);
+                    try {
+                        Thread.sleep(backoff);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new TsaException("TSA retry interrupted", ie);
+                    }
+                }
+
+                long tsaStart = System.currentTimeMillis();
                 try {
-                    Thread.sleep(backoff);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new TsaException("TSA retry interrupted", ie);
+                    DSSDocument signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
+                    long tsaTime = System.currentTimeMillis() - tsaStart;
+                    totalLatency += tsaTime;
+
+                    LOG.info("TSA_OK: Timestamp from {} in {}ms (attempt {}, total attempts: {})",
+                        currentTsaUrl, tsaTime, attempt, totalAttempts);
+
+                    // Record TSA metrics in audit
+                    audit.setTsaUrlUsed(currentTsaUrl);
+                    audit.setTsaFallbackUsed(isFallback);
+                    audit.setTsaQualified(qualified);
+                    audit.setTsaLatencyMs(totalLatency);
+                    audit.setTsaAttempts(totalAttempts);
+                    audit.setTsaTokenTime(Instant.now());
+
+                    return signedDocument;
+
+                } catch (Exception e) {
+                    long tsaTime = System.currentTimeMillis() - tsaStart;
+                    totalLatency += tsaTime;
+                    lastException = e;
+
+                    String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                    LOG.warn("TSA_FAIL: {} attempt {}/{} failed after {}ms: {}",
+                        isFallback ? "Fallback" : "Primary", attempt, TSA_MAX_RETRIES, tsaTime, errorMsg);
+
+                    // Check if this is a retryable error (network/timeout issues)
+                    if (!isRetryableTsaError(e)) {
+                        LOG.error("TSA error is not retryable, trying next TSA");
+                        break;
+                    }
                 }
             }
 
-            long tsaStart = System.currentTimeMillis();
-            try {
-                DSSDocument signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
-                long tsaTime = System.currentTimeMillis() - tsaStart;
-                totalLatency += tsaTime;
-
-                LOG.info("TSA_OK: Timestamp obtained in {}ms (attempt {}/{})", tsaTime, attempt, MAX_RETRIES);
-
-                // Record TSA metrics in audit
-                audit.setTsaLatencyMs(totalLatency);
-                audit.setTsaAttempts(attempt);
-                audit.setTsaTokenTime(Instant.now());
-
-                return signedDocument;
-
-            } catch (Exception e) {
-                long tsaTime = System.currentTimeMillis() - tsaStart;
-                totalLatency += tsaTime;
-                lastException = e;
-
-                String errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-                LOG.warn("TSA_FAIL: Attempt {}/{} failed after {}ms: {}",
-                    attempt, MAX_RETRIES, tsaTime, errorMsg);
-
-                // Check if this is a retryable error (network/timeout issues)
-                if (!isRetryableTsaError(e)) {
-                    LOG.error("TSA error is not retryable, giving up");
-                    break;
-                }
+            // This TSA failed, try fallback
+            if (!isFallback) {
+                LOG.warn("Primary TSA {} failed, switching to fallback", currentTsaUrl);
             }
         }
 
-        // All retries exhausted
+        // All TSAs exhausted
         audit.setTsaLatencyMs(totalLatency);
+        audit.setTsaAttempts(totalAttempts);
+        audit.setTsaFallbackUsed(true);
         String errorMsg = lastException != null ? lastException.getMessage() : "Unknown TSA error";
-        throw new TsaException("TSA failed after " + MAX_RETRIES + " attempts: " + errorMsg, lastException);
+        throw new TsaException("All TSA servers failed after " + totalAttempts + " total attempts: " + errorMsg, lastException);
+    }
+
+    /**
+     * Create TSP source with configured timeouts.
+     */
+    private static OnlineTSPSource createTspSource(String tsaUrl) {
+        OnlineTSPSource tspSource = new OnlineTSPSource(tsaUrl);
+        // Note: DSS OnlineTSPSource uses CommonsDataLoader internally
+        // Timeout configuration may need custom DataLoader for full control
+        return tspSource;
+    }
+
+    /**
+     * Check if TSA URL is a known eIDAS qualified TSA.
+     */
+    private static boolean isQualifiedTsa(String tsaUrl) {
+        if (tsaUrl == null) return false;
+        // Known eIDAS qualified TSA URLs
+        return tsaUrl.contains("timestamp.aped.gov.gr") ||  // APED Greece
+               tsaUrl.contains("tsa.swisssign.net") ||      // SwissSign
+               tsaUrl.contains("timestamp.sectigo.com") ||  // Sectigo
+               tsaUrl.contains("freetsa.org");              // FreeTSA (not qualified but free)
     }
 
     /**

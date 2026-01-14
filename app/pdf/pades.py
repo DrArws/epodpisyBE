@@ -45,6 +45,10 @@ class PAdESAuditRecord:
     kms_key_version: str
     signing_time_utc: str
     tsa_url: str
+    tsa_url_used: Optional[str]
+    tsa_fallback_url: Optional[str]
+    tsa_fallback_used: Optional[bool]
+    tsa_qualified: Optional[bool]
     tsa_token_time: Optional[str]
     signer_display_name: str
     signature_profile: str
@@ -246,6 +250,10 @@ class PAdESSigner:
                 kms_key_version=data.get("kms_key_version", ""),
                 signing_time_utc=data.get("signing_time_utc", ""),
                 tsa_url=data.get("tsa_url", ""),
+                tsa_url_used=data.get("tsa_url_used"),
+                tsa_fallback_url=data.get("tsa_fallback_url"),
+                tsa_fallback_used=data.get("tsa_fallback_used"),
+                tsa_qualified=data.get("tsa_qualified"),
                 tsa_token_time=data.get("tsa_token_time"),
                 signer_display_name=data.get("signer_display_name", ""),
                 signature_profile=data.get("signature_profile", ""),

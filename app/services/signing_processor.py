@@ -236,6 +236,10 @@ async def process_and_finalize_signature(
                 "signature_profile": pades_audit.signature_profile,
                 "kms_key_version": pades_audit.kms_key_version,
                 "tsa_url": pades_audit.tsa_url,
+                "tsa_url_used": pades_audit.tsa_url_used,
+                "tsa_fallback_url": pades_audit.tsa_fallback_url,
+                "tsa_fallback_used": pades_audit.tsa_fallback_used,
+                "tsa_qualified": pades_audit.tsa_qualified,
                 "document_hash_before": pades_audit.document_sha256_before,
                 "document_hash_after": pades_audit.document_sha256_after,
                 # Validation results
