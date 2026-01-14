@@ -3,7 +3,7 @@ package cz.drbacon.pades;
 import eu.europa.esig.dss.enumerations.DigestAlgorithm;
 import eu.europa.esig.dss.model.DSSException;
 import eu.europa.esig.dss.model.TimestampBinary;
-import eu.europa.esig.dss.service.http.commons.CommonsDataLoader;
+import eu.europa.esig.dss.service.http.commons.TimestampDataLoader;
 import eu.europa.esig.dss.service.tsp.OnlineTSPSource;
 import eu.europa.esig.dss.spi.x509.tsp.TSPSource;
 import org.slf4j.Logger;
@@ -181,19 +181,15 @@ public class FallbackTSPSource implements TSPSource {
     private OnlineTSPSource createConfiguredTspSource(String tsaUrl) {
         OnlineTSPSource tspSource = new OnlineTSPSource(tsaUrl);
 
-        // Configure DataLoader with timeouts
-        CommonsDataLoader dataLoader = new CommonsDataLoader();
+        // Use TimestampDataLoader - it sets Content-Type: application/timestamp-query
+        // which is REQUIRED by TSA servers (CommonsDataLoader doesn't set this!)
+        TimestampDataLoader dataLoader = new TimestampDataLoader();
         dataLoader.setTimeoutConnection(connectTimeoutMs);
         dataLoader.setTimeoutSocket(readTimeoutMs);
         // Connection request timeout (time waiting for connection from pool)
         dataLoader.setTimeoutConnectionRequest(connectTimeoutMs);
 
         tspSource.setDataLoader(dataLoader);
-
-        // CRITICAL: Request certificate in TSP response
-        // Many TSAs (APED, SwissSign) require certReq=true or return HTTP 400
-        // This sets the certReq field in the TimeStampReq ASN.1 structure
-        tspSource.setCertReq(true);
 
         return tspSource;
     }
