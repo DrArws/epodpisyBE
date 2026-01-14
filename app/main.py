@@ -219,15 +219,25 @@ from app.routers import health, auth_router, analysis, signing, internal
 # Middleware
 app.add_middleware(RequestIdMiddleware)
 
-# Production-safe CORS Configuration
+# CORS Configuration - merge environment variable with development defaults
+_settings = get_settings()
+_cors_origins = list(_settings.allowed_origins) if _settings.allowed_origins else []
+# Add development origins that are always allowed
+_dev_origins = [
+    "https://podpisy.lovable.app",
+    "https://lovable.dev",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+for origin in _dev_origins:
+    if origin not in _cors_origins:
+        _cors_origins.append(origin)
+
+logger.info(f"CORS allowed origins: {_cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://podpisy.lovable.app",
-        "https://lovable.dev",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
