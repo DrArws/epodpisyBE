@@ -129,22 +129,24 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
         int inputLength = toBeSigned.getBytes().length;
         LOG.info("Signing {} bytes with KMS, digest algorithm: {}", inputLength, digestAlgorithm);
 
-        // Debug: detect if DSS is sending raw data or already-hashed data
+        // Detect if DSS is sending raw data or already-hashed data
         // SHA256=32 bytes, SHA384=48 bytes, SHA512=64 bytes
-        // If input matches digest size, DSS might be sending pre-hashed data (unusual but possible)
         int expectedDigestSize = getExpectedDigestSize(digestAlgorithm);
-        if (inputLength == expectedDigestSize) {
-            LOG.warn("ToBeSigned length ({}) matches {} digest size - verify DSS is not double-hashing!",
-                inputLength, digestAlgorithm);
-        } else {
-            LOG.debug("ToBeSigned is raw data ({} bytes), will be hashed to {} bytes",
-                inputLength, expectedDigestSize);
-        }
+        boolean isAlreadyDigest = (inputLength == expectedDigestSize);
 
         try {
-            // Compute digest of the data to be signed
-            byte[] digest = computeDigest(toBeSigned.getBytes(), digestAlgorithm);
-            LOG.debug("Computed {} digest: {} bytes", digestAlgorithm, digest.length);
+            byte[] digest;
+            if (isAlreadyDigest) {
+                // DSS already computed the digest - use it directly, DO NOT re-hash!
+                digest = toBeSigned.getBytes();
+                LOG.info("KMS_SIGN: ToBeSigned IS digest ({} bytes) - using directly, digestHex={}...",
+                    inputLength, bytesToHex(digest, 8));
+            } else {
+                // DSS sent raw data - compute the digest
+                digest = computeDigest(toBeSigned.getBytes(), digestAlgorithm);
+                LOG.info("KMS_SIGN: ToBeSigned={} bytes (raw), computed digest={} bytes, digestHex={}...",
+                    inputLength, digest.length, bytesToHex(digest, 8));
+            }
 
             // Build KMS request with appropriate digest field
             Digest.Builder digestBuilder = Digest.newBuilder();
@@ -173,16 +175,18 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
             long kmsLatency = System.currentTimeMillis() - kmsStart;
 
             byte[] signatureBytes = response.getSignature().toByteArray();
-            LOG.info("KMS signature received: {} bytes in {}ms", signatureBytes.length, kmsLatency);
+            LOG.info("KMS_SIGN: signature={} bytes in {}ms, sigHex={}...",
+                signatureBytes.length, kmsLatency, bytesToHex(signatureBytes, 8));
 
             // Validate signature length for RSA4096: should be ~512 bytes
             if (signatureBytes.length < 256 || signatureBytes.length > 1024) {
-                LOG.warn("Unexpected signature length: {} bytes (expected ~512 for RSA4096)", signatureBytes.length);
+                LOG.warn("KMS_SIGN: Unexpected signature length: {} bytes (expected ~512 for RSA4096)",
+                    signatureBytes.length);
             }
 
             // IMPORTANT: Set correct SignatureAlgorithm based on digest algorithm used
             SignatureAlgorithm signatureAlgorithm = mapToSignatureAlgorithm(digestAlgorithm);
-            LOG.debug("Using SignatureAlgorithm: {}", signatureAlgorithm);
+            LOG.info("KMS_SIGN: Using SignatureAlgorithm: {}", signatureAlgorithm);
 
             SignatureValue signatureValue = new SignatureValue();
             signatureValue.setAlgorithm(signatureAlgorithm);
@@ -229,6 +233,18 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
         String javaAlgorithm = algorithm.getJavaName();
         MessageDigest md = MessageDigest.getInstance(javaAlgorithm);
         return md.digest(data);
+    }
+
+    /**
+     * Convert first N bytes to hex string for logging.
+     */
+    private String bytesToHex(byte[] bytes, int maxBytes) {
+        int len = Math.min(bytes.length, maxBytes);
+        StringBuilder sb = new StringBuilder(len * 2);
+        for (int i = 0; i < len; i++) {
+            sb.append(String.format("%02x", bytes[i]));
+        }
+        return sb.toString();
     }
 
     @Override

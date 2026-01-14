@@ -464,6 +464,17 @@ public class Main {
             audit.setSignatureProfile(signatureProfile);
             audit.setTsaApplied(tsaApplied);
 
+            // Pre-flight validation: verify signature in memory BEFORE writing to disk
+            LOG.info("Pre-flight validation: verifying signature in memory...");
+            boolean preflightOk = validateInMemory(signedDocument, certificateVerifier);
+            if (!preflightOk) {
+                LOG.error("PRE_FLIGHT_FAIL: Signature validation failed in memory before disk write!");
+                audit.addError("PRE_FLIGHT_FAIL: Signature invalid before disk write");
+                // Continue anyway to write the file for debugging, but log prominently
+            } else {
+                LOG.info("PRE_FLIGHT_OK: In-memory signature validation passed");
+            }
+
             // Save signed document
             LOG.info("Saving signed document to: {}", outputPath);
             try (OutputStream os = new FileOutputStream(outputPath)) {
@@ -471,8 +482,8 @@ public class Main {
             }
             LOG.info("PDF_WRITE_OK: Document saved successfully (profile: {})", signatureProfile);
 
-            // Validate the signature integrity (server-side verification)
-            LOG.info("Validating signature integrity...");
+            // Post-write validation: verify signature after writing to disk
+            LOG.info("Post-write validation: verifying signature from disk...");
             validateSignedDocument(outputPath, audit);
 
             LOG.info("Document signed and validated successfully!");
@@ -542,7 +553,7 @@ public class Main {
             int timestampCount = simpleReport.getSignatureTimestamps(signatureId).size();
             boolean hasTimestamp = timestampCount > 0;
 
-            // Log results
+            // Log results with prominent indication/subIndication for debugging
             LOG.info("VALIDATION: indication={}, subIndication={}", indication, subIndication);
             LOG.info("VALIDATION: signatureIntact={}, signatureValid={}, timestamps={}",
                 signatureIntact, signatureValid, timestampCount);
@@ -560,8 +571,22 @@ public class Main {
             if (signatureIntact) {
                 LOG.info("VALIDATION_OK: Signature integrity verified");
             } else {
-                LOG.error("VALIDATION_FAIL: Signature integrity check failed!");
-                audit.addError("VALIDATION_ERROR: Signature integrity failed");
+                // Log detailed error info for TOTAL_FAILED cases
+                String subIndicationStr = subIndication != null ? subIndication.name() : "null";
+                LOG.error("VALIDATION_FAIL: Signature integrity check failed! indication={}, subIndication={}",
+                    indication, subIndicationStr);
+
+                // Try to get more details from the detailed report
+                try {
+                    eu.europa.esig.dss.detailedreport.DetailedReport detailedReport = reports.getDetailedReport();
+                    String conclusion = detailedReport.getBasicBuildingBlocksSignatureConclusion(signatureId);
+                    LOG.error("VALIDATION_FAIL: BBB conclusion: {}", conclusion);
+                } catch (Exception detailEx) {
+                    LOG.warn("Could not extract detailed report info: {}", detailEx.getMessage());
+                }
+
+                audit.addError("VALIDATION_ERROR: Signature integrity failed (indication=" + indication +
+                    ", subIndication=" + subIndicationStr + ")");
             }
 
             if (hasTimestamp) {
@@ -574,6 +599,51 @@ public class Main {
             LOG.error("Validation failed with exception", e);
             audit.setSignatureIntegrityOk(false);
             audit.addError("VALIDATION_ERROR: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Validate signature in memory before writing to disk.
+     * Returns true if signature is cryptographically valid.
+     */
+    private static boolean validateInMemory(DSSDocument signedDoc, CommonCertificateVerifier certificateVerifier) {
+        try {
+            SignedDocumentValidator validator = SignedDocumentValidator.fromDocument(signedDoc);
+            validator.setCertificateVerifier(certificateVerifier);
+
+            Reports reports = validator.validateDocument();
+            SimpleReport simpleReport = reports.getSimpleReport();
+
+            String signatureId = simpleReport.getFirstSignatureId();
+            if (signatureId == null) {
+                LOG.error("PRE_FLIGHT: No signature found in document");
+                return false;
+            }
+
+            Indication indication = simpleReport.getIndication(signatureId);
+            SubIndication subIndication = simpleReport.getSubIndication(signatureId);
+
+            LOG.info("PRE_FLIGHT: indication={}, subIndication={}", indication, subIndication);
+
+            if (indication == Indication.TOTAL_FAILED) {
+                LOG.error("PRE_FLIGHT: TOTAL_FAILED - subIndication={}", subIndication);
+
+                // Dump more diagnostic info
+                try {
+                    eu.europa.esig.dss.detailedreport.DetailedReport detailedReport = reports.getDetailedReport();
+                    LOG.error("PRE_FLIGHT: Detailed conclusion: {}",
+                        detailedReport.getBasicBuildingBlocksSignatureConclusion(signatureId));
+                } catch (Exception ex) {
+                    LOG.warn("PRE_FLIGHT: Could not get detailed report: {}", ex.getMessage());
+                }
+
+                return false;
+            }
+
+            return true;
+        } catch (Exception e) {
+            LOG.error("PRE_FLIGHT: Validation exception: {}", e.getMessage(), e);
+            return false;
         }
     }
 
