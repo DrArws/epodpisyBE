@@ -27,6 +27,15 @@ PADES_JAR_PATH_DEV = str(
 )
 
 
+# Exit codes from Java signer
+PADES_EXIT_SUCCESS = 0
+PADES_EXIT_USAGE_ERROR = 1
+PADES_EXIT_CONFIG_ERROR = 2
+PADES_EXIT_KMS_ERROR = 3
+PADES_EXIT_TSA_ERROR = 4
+PADES_EXIT_PDF_ERROR = 5
+
+
 @dataclass
 class PAdESAuditRecord:
     """Audit record from PAdES signing operation."""
@@ -39,6 +48,17 @@ class PAdESAuditRecord:
     tsa_token_time: Optional[str]
     signer_display_name: str
     signature_profile: str
+    certificate_subject: Optional[str]
+    certificate_fingerprint: Optional[str]
+    trust_model: Optional[str]
+    kms_latency_ms: Optional[int]
+    tsa_latency_ms: Optional[int]
+    tsa_attempts: Optional[int]
+    signature_bytes: Optional[int]
+    signature_integrity_ok: Optional[bool]
+    timestamp_integrity_ok: Optional[bool]
+    validation_indication: Optional[str]
+    validation_sub_indication: Optional[str]
     success: bool
     errors: list
 
@@ -163,11 +183,20 @@ class PAdESSigner:
             # Parse audit record
             audit = self._parse_audit(audit_json)
 
-            # Check result
+            # Check result with specific error messages based on exit code
             if result.returncode != 0:
-                error_msg = f"PAdES signing failed with exit code {result.returncode}"
+                exit_code = result.returncode
+                error_type = {
+                    PADES_EXIT_USAGE_ERROR: "Usage error",
+                    PADES_EXIT_CONFIG_ERROR: "Configuration error (KMS_KEY_NAME)",
+                    PADES_EXIT_KMS_ERROR: "KMS error (permission denied or key not found)",
+                    PADES_EXIT_TSA_ERROR: "TSA/network error (timestamp server unavailable)",
+                    PADES_EXIT_PDF_ERROR: "PDF error (file not found or parse/write error)",
+                }.get(exit_code, f"Unknown error (exit code {exit_code})")
+
+                error_msg = f"PAdES signing failed: {error_type}"
                 if audit and audit.errors:
-                    error_msg += f": {', '.join(audit.errors)}"
+                    error_msg += f" - {', '.join(audit.errors)}"
                 raise PAdESSigningError(error_msg, audit)
 
             if not os.path.exists(signed_pdf):
@@ -220,6 +249,17 @@ class PAdESSigner:
                 tsa_token_time=data.get("tsa_token_time"),
                 signer_display_name=data.get("signer_display_name", ""),
                 signature_profile=data.get("signature_profile", ""),
+                certificate_subject=data.get("certificate_subject"),
+                certificate_fingerprint=data.get("certificate_fingerprint"),
+                trust_model=data.get("trust_model"),
+                kms_latency_ms=data.get("kms_latency_ms"),
+                tsa_latency_ms=data.get("tsa_latency_ms"),
+                tsa_attempts=data.get("tsa_attempts"),
+                signature_bytes=data.get("signature_bytes"),
+                signature_integrity_ok=data.get("signature_integrity_ok"),
+                timestamp_integrity_ok=data.get("timestamp_integrity_ok"),
+                validation_indication=data.get("validation_indication"),
+                validation_sub_indication=data.get("validation_sub_indication"),
                 success=data.get("success", False),
                 errors=data.get("errors", []),
             )

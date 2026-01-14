@@ -126,14 +126,27 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
     @Override
     public SignatureValue sign(ToBeSigned toBeSigned, DigestAlgorithm digestAlgorithm,
                                DSSPrivateKeyEntry keyEntry) throws DSSException {
-        LOG.info("Signing {} bytes with KMS, digest algorithm: {}", toBeSigned.getBytes().length, digestAlgorithm);
+        int inputLength = toBeSigned.getBytes().length;
+        LOG.info("Signing {} bytes with KMS, digest algorithm: {}", inputLength, digestAlgorithm);
+
+        // Debug: detect if DSS is sending raw data or already-hashed data
+        // SHA256=32 bytes, SHA384=48 bytes, SHA512=64 bytes
+        // If input matches digest size, DSS might be sending pre-hashed data (unusual but possible)
+        int expectedDigestSize = getExpectedDigestSize(digestAlgorithm);
+        if (inputLength == expectedDigestSize) {
+            LOG.warn("ToBeSigned length ({}) matches {} digest size - verify DSS is not double-hashing!",
+                inputLength, digestAlgorithm);
+        } else {
+            LOG.debug("ToBeSigned is raw data ({} bytes), will be hashed to {} bytes",
+                inputLength, expectedDigestSize);
+        }
 
         try {
-            // Compute digest
+            // Compute digest of the data to be signed
             byte[] digest = computeDigest(toBeSigned.getBytes(), digestAlgorithm);
-            LOG.debug("Computed digest: {} bytes", digest.length);
+            LOG.debug("Computed {} digest: {} bytes", digestAlgorithm, digest.length);
 
-            // Build KMS request
+            // Build KMS request with appropriate digest field
             Digest.Builder digestBuilder = Digest.newBuilder();
             switch (digestAlgorithm) {
                 case SHA256:
@@ -155,13 +168,24 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
                 .build();
 
             LOG.info("Calling KMS asymmetricSign for key: {}", keyVersionName);
+            long kmsStart = System.currentTimeMillis();
             AsymmetricSignResponse response = kmsClient.asymmetricSign(request);
+            long kmsLatency = System.currentTimeMillis() - kmsStart;
 
             byte[] signatureBytes = response.getSignature().toByteArray();
-            LOG.info("KMS signature received: {} bytes", signatureBytes.length);
+            LOG.info("KMS signature received: {} bytes in {}ms", signatureBytes.length, kmsLatency);
+
+            // Validate signature length for RSA4096: should be ~512 bytes
+            if (signatureBytes.length < 256 || signatureBytes.length > 1024) {
+                LOG.warn("Unexpected signature length: {} bytes (expected ~512 for RSA4096)", signatureBytes.length);
+            }
+
+            // IMPORTANT: Set correct SignatureAlgorithm based on digest algorithm used
+            SignatureAlgorithm signatureAlgorithm = mapToSignatureAlgorithm(digestAlgorithm);
+            LOG.debug("Using SignatureAlgorithm: {}", signatureAlgorithm);
 
             SignatureValue signatureValue = new SignatureValue();
-            signatureValue.setAlgorithm(SignatureAlgorithm.RSA_SHA256);
+            signatureValue.setAlgorithm(signatureAlgorithm);
             signatureValue.setValue(signatureBytes);
 
             return signatureValue;
@@ -169,6 +193,35 @@ public class KmsSignatureToken extends AbstractSignatureTokenConnection {
         } catch (Exception e) {
             LOG.error("KMS signing failed", e);
             throw new DSSException("KMS signing failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Map DSS DigestAlgorithm to the correct SignatureAlgorithm for RSA.
+     */
+    private SignatureAlgorithm mapToSignatureAlgorithm(DigestAlgorithm digestAlgorithm) {
+        switch (digestAlgorithm) {
+            case SHA256:
+                return SignatureAlgorithm.RSA_SHA256;
+            case SHA384:
+                return SignatureAlgorithm.RSA_SHA384;
+            case SHA512:
+                return SignatureAlgorithm.RSA_SHA512;
+            default:
+                LOG.warn("Unknown digest algorithm {}, defaulting to RSA_SHA256", digestAlgorithm);
+                return SignatureAlgorithm.RSA_SHA256;
+        }
+    }
+
+    /**
+     * Get expected digest size in bytes for the given algorithm.
+     */
+    private int getExpectedDigestSize(DigestAlgorithm algorithm) {
+        switch (algorithm) {
+            case SHA256: return 32;
+            case SHA384: return 48;
+            case SHA512: return 64;
+            default: return -1;
         }
     }
 

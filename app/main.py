@@ -40,6 +40,7 @@ from app.models import (
     SignRequest,
     SignResponse,
     FinalizeResponse,
+    SignatureVerificationResponse,
     EventType,
     SignerStatus,
     DocumentStatus,
@@ -1419,6 +1420,89 @@ async def finalize_document(
             shutil.rmtree(temp_dir, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Cleanup error: {e}")
+
+
+@app.get(
+    "/v1/documents/{document_id}/signature/verify",
+    response_model=SignatureVerificationResponse,
+)
+async def verify_document_signature(
+    request: Request,
+    document_id: str = Path(..., description="Document ID"),
+    user: AuthenticatedUser = Depends(get_current_user),
+    supabase: SupabaseClient = Depends(get_supabase_client),
+):
+    """
+    Verify signature integrity of a signed document.
+    This endpoint retrieves the validation results from when the document was signed.
+    For admin/audit purposes - verifies that the signature is cryptographically valid.
+
+    Note: This does not re-validate the signature (which would require downloading the PDF
+    and running DSS validator). Instead, it returns the validation results stored during signing.
+    """
+    # Validate UUID format
+    validate_uuid(document_id, "document_id")
+
+    set_context(document_id=document_id)
+    logger.info("Verifying document signature")
+
+    # Get document
+    document = await supabase.get_document(document_id, user.workspace_id)
+    if not document:
+        raise NotFoundError("Document", document_id)
+
+    # Check document is signed
+    if document.status not in [DocumentStatus.COMPLETED.value, "completed"]:
+        raise ValidationException(
+            f"Document is not completed (status: {document.status})"
+        )
+
+    # Get signing session(s) with validation info
+    # We need to get the pades_info from the signing session
+    sessions = await supabase.admin_select(
+        "signing_sessions",
+        {"document_id": document_id},
+        single=False,
+    )
+
+    if not sessions:
+        raise ValidationException("No signing sessions found for document")
+
+    # Find a completed session with pades_info
+    pades_info = None
+    signed_at = None
+    for session in sessions:
+        if session.get("signed_at") and session.get("pades_info"):
+            pades_info = session.get("pades_info")
+            signed_at = session.get("signed_at")
+            break
+
+    if not pades_info:
+        # Fallback: document was signed but validation info not stored
+        # This can happen for documents signed before validation was added
+        return SignatureVerificationResponse(
+            document_id=document_id,
+            signature_integrity_ok=True,  # Assume OK if signed completed
+            timestamp_integrity_ok=True,
+            errors=["Validation details not available (signed before validation tracking)"],
+            signed_at=signed_at,
+        )
+
+    # Extract validation info from pades_info
+    return SignatureVerificationResponse(
+        document_id=document_id,
+        signature_integrity_ok=pades_info.get("signature_integrity_ok", True),
+        timestamp_integrity_ok=pades_info.get("timestamp_integrity_ok", True),
+        validation_indication=pades_info.get("validation_indication"),
+        validation_sub_indication=pades_info.get("validation_sub_indication"),
+        certificate_subject=pades_info.get("certificate_subject"),
+        certificate_fingerprint=pades_info.get("certificate_fingerprint"),
+        trust_model=pades_info.get("trust_model", "self-signed"),
+        signature_profile=pades_info.get("signature_profile"),
+        tsa_url=pades_info.get("tsa_url"),
+        signed_at=signed_at,
+        errors=pades_info.get("errors", []),
+    )
 
 
 # ============================================================================

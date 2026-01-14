@@ -58,6 +58,39 @@ public class AuditRecord {
     @JsonProperty("signature_profile")
     private String signatureProfile;
 
+    @JsonProperty("certificate_subject")
+    private String certificateSubject;
+
+    @JsonProperty("certificate_fingerprint")
+    private String certificateFingerprint;
+
+    @JsonProperty("trust_model")
+    private String trustModel;
+
+    @JsonProperty("kms_latency_ms")
+    private Long kmsLatencyMs;
+
+    @JsonProperty("tsa_latency_ms")
+    private Long tsaLatencyMs;
+
+    @JsonProperty("tsa_attempts")
+    private Integer tsaAttempts;
+
+    @JsonProperty("signature_bytes")
+    private Integer signatureBytes;
+
+    @JsonProperty("signature_integrity_ok")
+    private Boolean signatureIntegrityOk;
+
+    @JsonProperty("timestamp_integrity_ok")
+    private Boolean timestampIntegrityOk;
+
+    @JsonProperty("validation_indication")
+    private String validationIndication;
+
+    @JsonProperty("validation_sub_indication")
+    private String validationSubIndication;
+
     @JsonProperty("input_file")
     private String inputFile;
 
@@ -182,6 +215,94 @@ public class AuditRecord {
 
     public void setSignatureProfile(String signatureProfile) {
         this.signatureProfile = signatureProfile;
+    }
+
+    public String getCertificateSubject() {
+        return certificateSubject;
+    }
+
+    public void setCertificateSubject(String certificateSubject) {
+        this.certificateSubject = certificateSubject;
+    }
+
+    public String getCertificateFingerprint() {
+        return certificateFingerprint;
+    }
+
+    public void setCertificateFingerprint(String certificateFingerprint) {
+        this.certificateFingerprint = certificateFingerprint;
+    }
+
+    public String getTrustModel() {
+        return trustModel;
+    }
+
+    public void setTrustModel(String trustModel) {
+        this.trustModel = trustModel;
+    }
+
+    public Long getKmsLatencyMs() {
+        return kmsLatencyMs;
+    }
+
+    public void setKmsLatencyMs(Long kmsLatencyMs) {
+        this.kmsLatencyMs = kmsLatencyMs;
+    }
+
+    public Long getTsaLatencyMs() {
+        return tsaLatencyMs;
+    }
+
+    public void setTsaLatencyMs(Long tsaLatencyMs) {
+        this.tsaLatencyMs = tsaLatencyMs;
+    }
+
+    public Integer getTsaAttempts() {
+        return tsaAttempts;
+    }
+
+    public void setTsaAttempts(Integer tsaAttempts) {
+        this.tsaAttempts = tsaAttempts;
+    }
+
+    public Integer getSignatureBytes() {
+        return signatureBytes;
+    }
+
+    public void setSignatureBytes(Integer signatureBytes) {
+        this.signatureBytes = signatureBytes;
+    }
+
+    public Boolean getSignatureIntegrityOk() {
+        return signatureIntegrityOk;
+    }
+
+    public void setSignatureIntegrityOk(Boolean signatureIntegrityOk) {
+        this.signatureIntegrityOk = signatureIntegrityOk;
+    }
+
+    public Boolean getTimestampIntegrityOk() {
+        return timestampIntegrityOk;
+    }
+
+    public void setTimestampIntegrityOk(Boolean timestampIntegrityOk) {
+        this.timestampIntegrityOk = timestampIntegrityOk;
+    }
+
+    public String getValidationIndication() {
+        return validationIndication;
+    }
+
+    public void setValidationIndication(String validationIndication) {
+        this.validationIndication = validationIndication;
+    }
+
+    public String getValidationSubIndication() {
+        return validationSubIndication;
+    }
+
+    public void setValidationSubIndication(String validationSubIndication) {
+        this.validationSubIndication = validationSubIndication;
     }
 
     public String getInputFile() {

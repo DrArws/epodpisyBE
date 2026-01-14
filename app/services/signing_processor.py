@@ -4,7 +4,9 @@ import shutil
 import tempfile
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, List
+
+import httpx
 
 from app.config import get_settings, Settings
 from app.gcs import get_gcs_client, GCSClient
@@ -13,9 +15,120 @@ from app.pdf import get_pdf_signer, StampInfo, generate_verification_id, Placeme
 from app.pdf.sign import SignaturePlacement, SigningError
 from app.utils.security import compute_file_hash
 from app.utils.datetime_utils import utc_now
-from app.models import SigningSession, SignerStatus, SignCompleteResponse
+from app.models import SigningSession, SignerStatus, SignCompleteResponse, EmailTemplateContext
+from app.email import get_email_service, EmailService
 
 logger = logging.getLogger(__name__)
+
+
+async def send_signing_notification_emails(
+    document_id: str,
+    workspace_id: str,
+    signer_name: str,
+    signed_at: datetime,
+    document_name: str,
+    is_all_signed: bool,
+    signed_pdf_url: Optional[str] = None,
+) -> None:
+    """
+    Send notification emails after a signature is completed.
+
+    - DOCUMENT_SIGNED: Always sent to document owner when someone signs
+    - ALL_SIGNED: Sent to all signers when document is fully signed
+
+    These emails use templates configurable in the frontend.
+    Errors are logged but do not fail the signing process.
+    """
+    settings = get_settings()
+    supabase = get_supabase_client()
+    email_service = get_email_service()
+
+    # Get workspace name for email templates
+    try:
+        workspace = await supabase.get_workspace_admin(workspace_id)
+        workspace_name = workspace.get("name", "Podpisy") if workspace else "Podpisy"
+    except Exception as e:
+        logger.warning(f"Failed to get workspace name: {e}")
+        workspace_name = "Podpisy"
+
+    async with httpx.AsyncClient(base_url=settings.supabase_url) as http_client:
+        # 1. DOCUMENT_SIGNED - notify document owner
+        try:
+            owner_email = await supabase.get_document_owner_email(document_id)
+            if owner_email:
+                context = EmailTemplateContext(
+                    document_name=document_name,
+                    workspace_name=workspace_name,
+                    signer_name=signer_name,
+                    signed_at=signed_at.strftime("%d.%m.%Y %H:%M"),
+                )
+                result = await email_service.send_signed_notification(
+                    to_email=owner_email,
+                    context=context,
+                    workspace_id=workspace_id,
+                    http_client=http_client,
+                    document_id=document_id,
+                )
+                if result.success:
+                    logger.info(f"DOCUMENT_SIGNED email sent to owner for document {document_id}")
+                else:
+                    logger.warning(f"DOCUMENT_SIGNED email failed: {result.error}")
+            else:
+                logger.warning(f"No owner email found for document {document_id}")
+        except Exception as e:
+            logger.error(f"Error sending DOCUMENT_SIGNED email: {e}")
+
+        # 2. ALL_SIGNED - notify all signers when document is complete
+        if is_all_signed:
+            try:
+                signers = await supabase.get_all_signers_for_document(document_id)
+                context = EmailTemplateContext(
+                    document_name=document_name,
+                    workspace_name=workspace_name,
+                    completed_at=signed_at.strftime("%d.%m.%Y %H:%M"),
+                    download_link=signed_pdf_url,
+                )
+
+                for signer in signers:
+                    signer_email = signer.get("email")
+                    if not signer_email:
+                        continue
+
+                    try:
+                        result = await email_service.send_all_signed_notification(
+                            to_email=signer_email,
+                            context=context,
+                            workspace_id=workspace_id,
+                            http_client=http_client,
+                            document_id=document_id,
+                        )
+                        if result.success:
+                            logger.info(f"ALL_SIGNED email sent to {signer.get('name')} for document {document_id}")
+                        else:
+                            logger.warning(f"ALL_SIGNED email failed for {signer.get('name')}: {result.error}")
+                    except Exception as e:
+                        logger.error(f"Error sending ALL_SIGNED email to {signer.get('name')}: {e}")
+
+                # Also notify the document owner
+                try:
+                    owner_email = await supabase.get_document_owner_email(document_id)
+                    if owner_email:
+                        result = await email_service.send_all_signed_notification(
+                            to_email=owner_email,
+                            context=context,
+                            workspace_id=workspace_id,
+                            http_client=http_client,
+                            document_id=document_id,
+                        )
+                        if result.success:
+                            logger.info(f"ALL_SIGNED email sent to owner for document {document_id}")
+                        else:
+                            logger.warning(f"ALL_SIGNED email to owner failed: {result.error}")
+                except Exception as e:
+                    logger.error(f"Error sending ALL_SIGNED email to owner: {e}")
+
+            except Exception as e:
+                logger.error(f"Error sending ALL_SIGNED notifications: {e}")
 
 
 async def process_and_finalize_signature(
@@ -125,11 +238,23 @@ async def process_and_finalize_signature(
                 "tsa_url": pades_audit.tsa_url,
                 "document_hash_before": pades_audit.document_sha256_before,
                 "document_hash_after": pades_audit.document_sha256_after,
+                # Validation results
+                "signature_integrity_ok": pades_audit.signature_integrity_ok,
+                "timestamp_integrity_ok": pades_audit.timestamp_integrity_ok,
+                "validation_indication": pades_audit.validation_indication,
+                "validation_sub_indication": pades_audit.validation_sub_indication,
+                # Certificate info
+                "certificate_subject": pades_audit.certificate_subject,
+                "certificate_fingerprint": pades_audit.certificate_fingerprint,
+                "trust_model": pades_audit.trust_model,
+                # Metrics
+                "kms_latency_ms": pades_audit.kms_latency_ms,
+                "tsa_latency_ms": pades_audit.tsa_latency_ms,
+                "tsa_attempts": pades_audit.tsa_attempts,
+                "signature_bytes": pades_audit.signature_bytes,
+                "errors": pades_audit.errors,
             }
         await supabase.update_signing_session(session_id=session.id, updates=session_updates)
-
-        # NOTE: Email notifications are handled by frontend/Edge Function
-        # Backend no longer sends emails to avoid duplicates
 
         # Generate download URL and create response
         signed_pdf_url = gcs.generate_download_signed_url(
@@ -137,9 +262,28 @@ async def process_and_finalize_signature(
             expiration_minutes=settings.gcs_signed_url_expiration_minutes,
             filename=f"{doc_data.get('name', 'document')}_signed.pdf",
         )
-        
+
+        # Check if all signers have signed
+        pending_count = await supabase.get_pending_signers_count(session.document_id)
+        is_all_signed = pending_count == 0
+
+        # Send email notifications (DOCUMENT_SIGNED to owner, ALL_SIGNED if complete)
+        # Errors are logged but do not fail the signing process
+        try:
+            await send_signing_notification_emails(
+                document_id=session.document_id,
+                workspace_id=session.workspace_id,
+                signer_name=session.name,
+                signed_at=signed_at,
+                document_name=doc_data.get("name", "Dokument"),
+                is_all_signed=is_all_signed,
+                signed_pdf_url=signed_pdf_url,
+            )
+        except Exception as e:
+            logger.error(f"Email notification error (non-fatal): {e}")
+
         response = SignCompleteResponse(status="completed", signed_pdf_url=signed_pdf_url, signed_at=signed_at)
-        
+
         logger.info(f"Signature processing complete for session {session.id}")
         
         return response

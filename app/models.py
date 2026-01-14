@@ -240,6 +240,22 @@ class FinalizeResponse(BaseModel):
     completed_at: datetime
 
 
+class SignatureVerificationResponse(BaseModel):
+    """Response from signature verification endpoint."""
+    document_id: str
+    signature_integrity_ok: bool
+    timestamp_integrity_ok: bool
+    validation_indication: Optional[str] = None
+    validation_sub_indication: Optional[str] = None
+    certificate_subject: Optional[str] = None
+    certificate_fingerprint: Optional[str] = None
+    trust_model: Optional[str] = None
+    signature_profile: Optional[str] = None
+    tsa_url: Optional[str] = None
+    signed_at: Optional[datetime] = None
+    errors: List[str] = []
+
+
 class SignerResponse(BaseModel):
     """Signer information in response."""
     id: str

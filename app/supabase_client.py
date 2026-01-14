@@ -825,6 +825,54 @@ class SupabaseClient:
             return memberships[0]["workspace_id"]
         return None
 
+    async def get_workspace_admin(self, workspace_id: str) -> Optional[Dict]:
+        """
+        Get workspace by ID via admin proxy (bypasses RLS).
+        Returns workspace data including name.
+        """
+        result = await self.admin_select(
+            "workspaces",
+            {"id": workspace_id},
+            single=True,
+        )
+        return result
+
+    async def get_document_owner_email(self, document_id: str) -> Optional[str]:
+        """
+        Get the email of the document owner (created_by user).
+        Returns email address or None if not found.
+        """
+        # First get the document to find created_by
+        doc = await self.admin_select(
+            "documents",
+            {"id": document_id},
+            single=True,
+        )
+        if not doc or not doc.get("created_by"):
+            return None
+
+        # Get user's email from users table
+        user = await self.admin_select(
+            "users",
+            {"id": doc["created_by"]},
+            single=True,
+        )
+        if not user:
+            return None
+
+        return user.get("email")
+
+    async def get_all_signers_for_document(self, document_id: str) -> List[Dict]:
+        """
+        Get all signers for a document (bypasses RLS).
+        Used for sending ALL_SIGNED notifications.
+        """
+        result = await self.admin_select(
+            "document_signers",
+            {"document_id": document_id},
+            single=False,
+        )
+        return result or []
 
 
 # Singleton instance

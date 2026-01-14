@@ -52,8 +52,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
     # PAdES signer JAR location
     PADES_JAR_PATH="/app/lib/pades-kms-signer.jar" \
-    # Java options for Cloud Run
-    JAVA_OPTS="-Xmx256m -XX:+UseG1GC"
+    # Java options for Cloud Run - headless mode and UTC timezone for consistent audit timestamps
+    JAVA_TOOL_OPTIONS="-Djava.awt.headless=true -Duser.timezone=UTC -Xmx256m -XX:+UseG1GC"
 
 # Install runtime dependencies
 # LibreOffice for document conversion + fonts + Java 17 JRE for PAdES signing
