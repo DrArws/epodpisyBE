@@ -214,3 +214,83 @@ def get_settings() -> Settings:
 # Convenience function for dependency injection
 def get_config() -> Settings:
     return get_settings()
+
+
+# =============================================================================
+# CORS Configuration
+# =============================================================================
+
+# Default allowed origins (always allowed)
+DEFAULT_CORS_ORIGINS = [
+    "https://drbacon.cz",
+    "https://podpisy.lovable.app",
+    "https://lovable.dev",
+]
+
+# Development origins (only in non-production)
+DEV_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+
+# Regex pattern for dynamic subdomains
+CORS_ORIGIN_REGEX = r"https://.*\.lovableproject\.com"
+
+
+def get_cors_origins() -> List[str]:
+    """
+    Get list of allowed CORS origins.
+
+    Combines:
+    1. Default origins (always allowed)
+    2. Origins from ALLOWED_ORIGINS env variable
+    3. Development origins (if not in production)
+    """
+    settings = get_settings()
+    origins = set(DEFAULT_CORS_ORIGINS)
+
+    # Add origins from environment variable
+    if settings.allowed_origins:
+        origins.update(settings.allowed_origins)
+
+    # Add development origins if not in production
+    if settings.environment != "production":
+        origins.update(DEV_CORS_ORIGINS)
+
+    return list(origins)
+
+
+def is_allowed_origin(origin: str) -> bool:
+    """
+    Check if an origin is allowed for CORS.
+
+    Checks:
+    1. Exact match in allowed origins list
+    2. Wildcard match for *.lovableproject.com
+    3. Localhost in development
+    """
+    import re
+
+    if not origin:
+        return False
+
+    settings = get_settings()
+
+    # Check exact match
+    allowed_origins = get_cors_origins()
+    if origin in allowed_origins:
+        return True
+
+    # Check wildcard pattern for lovableproject.com subdomains
+    if re.match(CORS_ORIGIN_REGEX, origin):
+        return True
+
+    # Allow any localhost in development
+    if settings.environment != "production":
+        if origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:"):
+            return True
+
+    return False

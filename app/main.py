@@ -15,7 +15,7 @@ from fastapi import FastAPI, Depends, Request, Path, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
-from app.config import get_settings, Settings
+from app.config import get_settings, Settings, get_cors_origins, CORS_ORIGIN_REGEX
 from app.auth import (
     get_current_user,
     get_admin_or_user,
@@ -219,16 +219,13 @@ from app.routers import health, auth_router, analysis, signing, internal
 # Middleware
 app.add_middleware(RequestIdMiddleware)
 
-# CORS Configuration - all allowed origins
+# CORS Configuration - dynamic origins from config
+# Origins come from: DEFAULT_CORS_ORIGINS + ALLOWED_ORIGINS env + DEV_CORS_ORIGINS (if not production)
+# Also supports wildcard *.lovableproject.com via regex
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://drbacon.cz",
-        "https://podpisy.lovable.app",
-        "https://lovable.dev",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=get_cors_origins(),
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.utils.logging import get_request_id
+from app.config import is_allowed_origin
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +20,8 @@ def _get_cors_origin(request: Request) -> Optional[str]:
     if not origin:
         return None
 
-    # Allow these origins
-    allowed = [
-        "https://drbacon.cz",
-        "https://podpisy.lovable.app",
-    ]
-
-    # Check exact match
-    if origin in allowed:
-        return origin
-
-    # Allow any *.lovableproject.com subdomain
-    if origin.endswith(".lovableproject.com"):
-        return origin
-
-    # Allow localhost for development
-    if origin.startswith("http://localhost:"):
+    # Use centralized CORS check from config
+    if is_allowed_origin(origin):
         return origin
 
     return None
