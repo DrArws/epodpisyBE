@@ -29,14 +29,7 @@ steps:
       - '--platform=managed'
       - '--service-account=e-signing-runtime@baconauth.iam.gserviceaccount.com'
       - '--allow-unauthenticated'
-      - '--memory=1Gi'
-      - '--cpu=1'
-      - '--timeout=300'
-      - '--concurrency=10'
-      - '--min-instances=0'
-      - '--max-instances=10'
-      - '--set-env-vars=GCP_PROJECT_ID=$PROJECT_ID,ENVIRONMENT=production,ALLOWED_ORIGINS=https://drbacon.cz;https://podpisy.lovable.app'
-      - '--set-secrets=SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_JWT_SECRET=SUPABASE_JWT_SECRET:latest,GCS_BUCKET=GCS_BUCKET:latest,TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest,TWILIO_VERIFY_SERVICE_SID=TWILIO_VERIFY_SERVICE_SID:latest,SIGNING_TOKEN_SALT=SIGNING_TOKEN_SALT:latest'
+      - '--update-env-vars=ALLOWED_ORIGINS=https://drbacon.cz;https://podpisy.lovable.app'
       - '--quiet'
 
 images:
