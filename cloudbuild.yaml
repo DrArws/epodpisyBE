@@ -22,7 +22,7 @@ steps:
     entrypoint: gcloud
     args:
       [
-        'run', 'deploy', 'esign-api',
+        'run', 'deploy', 'e-signing-service',
         '--image', 'europe-west1-docker.pkg.dev/$PROJECT_ID/esign-repo/e-signing-service:$COMMIT_SHA',
         '--region', 'europe-west1',
         '--platform', 'managed',

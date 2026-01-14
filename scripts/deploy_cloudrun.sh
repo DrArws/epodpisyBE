@@ -22,7 +22,7 @@ log_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 # =============================================================================
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${GCP_REGION:-europe-west1}"
-SERVICE_NAME="esign-api"
+SERVICE_NAME="e-signing-service"
 
 # Runtime Service Account - jediný zdroj pravdy
 RUNTIME_SA="e-signing-runtime@baconauth.iam.gserviceaccount.com"
