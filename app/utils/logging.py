@@ -265,6 +265,9 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         try:
             response = await call_next(request)
             response.headers["X-Request-ID"] = request_id
+            # Prevent browser/proxy caching of API responses (security best practice)
+            # This ensures sensitive data isn't stored in browser cache
+            response.headers["Cache-Control"] = "no-store"
             return response
         finally:
             clear_context()
