@@ -68,14 +68,16 @@ echo "==> Immutable image: ${IMAGE_IMMUTABLE}"
 SECRETS=(
   "ADMIN_API_SECRET=ADMIN_API_SECRET:latest"
   "GCS_BUCKET=GCS_BUCKET:latest"
+  "GEMINI_API_KEY=GEMINI_API_KEY:latest"
   "KMS_KEY_NAME=KMS_KEY_NAME:latest"
   "OAUTH_CLIENT_ID=OAUTH_CLIENT_ID:latest"
   "OAUTH_CLIENT_SECRET=OAUTH_CLIENT_SECRET:latest"
   "RESEND_API_KEY=RESEND_API_KEY:latest"
-  "SIGNING_TOKEN_SALT=SIGNING_TOKEN_SALT:latest"
   "SIGN_APP_URL=SIGN_APP_URL:latest"
+  "SIGNING_TOKEN_SALT=SIGNING_TOKEN_SALT:latest"
   "SUPABASE_ANON_KEY=SUPABASE_ANON_KEY:latest"
   "SUPABASE_JWT_SECRET=SUPABASE_JWT_SECRET:latest"
+  "SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest"
   "SUPABASE_URL=SUPABASE_URL:latest"
   "TWILIO_ACCOUNT_SID=TWILIO_ACCOUNT_SID:latest"
   "TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest"
@@ -86,7 +88,8 @@ SECRETS=(
 SECRETS_ARG=$(IFS=','; echo "${SECRETS[*]}")
 
 # Plain environment variables (non-secret)
-ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},ENVIRONMENT=production"
+# ALLOWED_ORIGINS uses semicolon as separator (comma is used by gcloud for key=value pairs)
+ENV_VARS="GCP_PROJECT_ID=${PROJECT_ID},ENVIRONMENT=production,ALLOWED_ORIGINS=https://drbacon.cz;https://podpisy.lovable.app"
 
 echo "==> Deploy EXACT digest (nikdy ne tag)"
 echo "   Loading ${#SECRETS[@]} secrets from Secret Manager"
