@@ -276,6 +276,15 @@ class SupabaseClient:
 
         return result or []
 
+    async def get_signer_by_id(self, signer_id: str) -> Optional[Dict]:
+        """Get a single signer by ID. Uses admin_select to bypass RLS."""
+        result = await self.admin_select(
+            "document_signers",
+            {"id": signer_id},
+            single=True,
+        )
+        return result
+
     async def update_signer(
         self,
         signer_id: str,

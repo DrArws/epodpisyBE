@@ -117,7 +117,7 @@ class RateLimiter:
 
 # Global rate limiter instances
 otp_rate_limiter = RateLimiter(max_requests=5, window_seconds=300)  # 5 OTP requests per 5 minutes
-verify_rate_limiter = RateLimiter(max_requests=10, window_seconds=60)  # 10 verify requests per minute per IP
+verify_rate_limiter = RateLimiter(max_requests=60, window_seconds=60)  # 60 verify requests per minute per IP (generous for QR scans)
 
 
 def get_otp_rate_limiter() -> RateLimiter:

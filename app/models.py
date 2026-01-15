@@ -473,6 +473,7 @@ class VerifyResponse(BaseModel):
     signer_name: Optional[str] = None
     signed_at: Optional[datetime] = None
     verification_method: Optional[str] = None
+    phone_masked: Optional[str] = None  # e.g., "+420***843"
     # NOTE: expected_hash intentionally not exposed - use POST /hash to verify
     status: str = "unknown"  # "valid", "invalid", "not_found", "pending"
     message: str = ""

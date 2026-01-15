@@ -20,6 +20,86 @@ from app.email import get_email_service, EmailService
 
 logger = logging.getLogger(__name__)
 
+# Default signature placement (used when signer has no placement set)
+DEFAULT_PLACEMENT = {
+    "page": 1,  # Will be overridden to last page
+    "x": 20,    # 20% from left
+    "y": 76,    # 76% from top (near bottom)
+    "width": 30,  # 30% of page width
+    "height": 6,  # 6% of page height
+}
+
+
+def _get_signature_placement(
+    signer_placement: Optional[Dict],
+    pdf_path: str,
+    page_count: int,
+) -> SignaturePlacement:
+    """
+    Get signature placement from signer data or use defaults.
+    Converts percentage values (0-100) to PDF points.
+
+    Args:
+        signer_placement: Placement from document_signers table (percentages)
+        pdf_path: Path to PDF file (to get page dimensions)
+        page_count: Total page count
+
+    Returns:
+        SignaturePlacement in PDF points
+    """
+    from app.pdf import get_pdf_signer
+
+    # Use signer placement or defaults
+    placement_data = signer_placement or DEFAULT_PLACEMENT.copy()
+
+    # Get page number (default to last page)
+    page = placement_data.get("page", page_count)
+    if page < 1:
+        page = 1
+    if page > page_count:
+        page = page_count
+
+    # Get page dimensions
+    signer = get_pdf_signer()
+    try:
+        dimensions = signer.get_page_dimensions(pdf_path, page)
+        page_width = dimensions["width"]
+        page_height = dimensions["height"]
+    except Exception as e:
+        logger.warning(f"Failed to get page dimensions, using A4 defaults: {e}")
+        page_width = 595.0  # A4 width in points
+        page_height = 842.0  # A4 height in points
+
+    # Get percentage values (frontend uses 0-100 range)
+    x_pct = float(placement_data.get("x", DEFAULT_PLACEMENT["x"]))
+    y_pct = float(placement_data.get("y", DEFAULT_PLACEMENT["y"]))
+    w_pct = float(placement_data.get("width", DEFAULT_PLACEMENT["width"]))
+    h_pct = float(placement_data.get("height", DEFAULT_PLACEMENT["height"]))
+
+    # Convert percentages to PDF points
+    x_pt = page_width * (x_pct / 100.0)
+    y_pt = page_height * (y_pct / 100.0)
+    w_pt = page_width * (w_pct / 100.0)
+    h_pt = page_height * (h_pct / 100.0)
+
+    # Ensure minimum dimensions
+    w_pt = max(w_pt, 100)  # Minimum 100 points width
+    h_pt = max(h_pt, 30)   # Minimum 30 points height
+
+    logger.info(
+        f"Signature placement: page={page}, "
+        f"pct=({x_pct:.1f}%, {y_pct:.1f}%, {w_pct:.1f}%, {h_pct:.1f}%) -> "
+        f"pts=({x_pt:.1f}, {y_pt:.1f}, {w_pt:.1f}, {h_pt:.1f})"
+    )
+
+    return SignaturePlacement(
+        page=page,
+        x=x_pt,
+        y=y_pt,
+        w=w_pt,
+        h=h_pt,
+    )
+
 
 async def send_signing_notification_emails(
     document_id: str,
@@ -175,11 +255,21 @@ async def process_and_finalize_signature(
         local_pdf = os.path.join(temp_dir, "current.pdf")
         gcs.download_to_file(current_pdf_path, local_pdf)
 
+        # Get signer data with signature_placement
+        signer_data = await supabase.get_signer_by_id(session.signer_id)
+        signer_placement = signer_data.get("signature_placement") if signer_data else None
+
         # Prepare for signing
         verification_id = generate_verification_id()
         # Use frontend URL for QR code verification link
         verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
-        placement = SignaturePlacement(page=doc_data.get("page_count", 1), x=120, y=640, w=180, h=50)
+
+        # Get placement from signer or use defaults
+        placement = _get_signature_placement(
+            signer_placement=signer_placement,
+            pdf_path=local_pdf,
+            page_count=doc_data.get("page_count", 1),
+        )
 
         phone_masked = None
         if session.phone and len(session.phone) > 6:

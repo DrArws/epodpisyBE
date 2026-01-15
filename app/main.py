@@ -9,7 +9,7 @@ import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Depends, Request, Path, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -170,6 +170,85 @@ def compute_otp_status(
     if otp_channel:
         return OTPStatus.SENT
     return OTPStatus.REQUIRED
+
+
+# Default signature placement (used when signer has no placement set)
+DEFAULT_PLACEMENT = {
+    "page": 1,  # Will be overridden to last page
+    "x": 20,    # 20% from left
+    "y": 76,    # 76% from top (near bottom)
+    "width": 30,  # 30% of page width
+    "height": 6,  # 6% of page height
+}
+
+
+def _get_signature_placement_from_signer(
+    signer_placement: Optional[Dict],
+    pdf_path: str,
+    page_count: int,
+) -> SignaturePlacement:
+    """
+    Get signature placement from signer data or use defaults.
+    Converts percentage values (0-100) to PDF points.
+
+    Args:
+        signer_placement: Placement from document_signers table (percentages)
+        pdf_path: Path to PDF file (to get page dimensions)
+        page_count: Total page count
+
+    Returns:
+        SignaturePlacement in PDF points
+    """
+    # Use signer placement or defaults
+    placement_data = signer_placement or DEFAULT_PLACEMENT.copy()
+
+    # Get page number (default to last page)
+    page = placement_data.get("page", page_count)
+    if page < 1:
+        page = 1
+    if page > page_count:
+        page = page_count
+
+    # Get page dimensions
+    pdf_signer = get_pdf_signer()
+    try:
+        dimensions = pdf_signer.get_page_dimensions(pdf_path, page)
+        page_width = dimensions["width"]
+        page_height = dimensions["height"]
+    except Exception as e:
+        logger.warning(f"Failed to get page dimensions, using A4 defaults: {e}")
+        page_width = 595.0  # A4 width in points
+        page_height = 842.0  # A4 height in points
+
+    # Get percentage values (frontend uses 0-100 range)
+    x_pct = float(placement_data.get("x", DEFAULT_PLACEMENT["x"]))
+    y_pct = float(placement_data.get("y", DEFAULT_PLACEMENT["y"]))
+    w_pct = float(placement_data.get("width", DEFAULT_PLACEMENT["width"]))
+    h_pct = float(placement_data.get("height", DEFAULT_PLACEMENT["height"]))
+
+    # Convert percentages to PDF points
+    x_pt = page_width * (x_pct / 100.0)
+    y_pt = page_height * (y_pct / 100.0)
+    w_pt = page_width * (w_pct / 100.0)
+    h_pt = page_height * (h_pct / 100.0)
+
+    # Ensure minimum dimensions
+    w_pt = max(w_pt, 100)  # Minimum 100 points width
+    h_pt = max(h_pt, 30)   # Minimum 30 points height
+
+    logger.info(
+        f"Signature placement: page={page}, "
+        f"pct=({x_pct:.1f}%, {y_pct:.1f}%, {w_pct:.1f}%, {h_pct:.1f}%) -> "
+        f"pts=({x_pt:.1f}, {y_pt:.1f}, {w_pt:.1f}, {h_pt:.1f})"
+    )
+
+    return SignaturePlacement(
+        page=page,
+        x=x_pt,
+        y=y_pt,
+        w=w_pt,
+        h=h_pt,
+    )
 
 
 @asynccontextmanager
@@ -1986,6 +2065,10 @@ async def sign_document(
     except Exception as e:
         logger.warning(f"Failed to load workspace stamp_config, using defaults: {e}")
 
+    # Get signer data with signature_placement
+    signer_data = await supabase.get_signer_by_id(session.signer_id)
+    signer_placement = signer_data.get("signature_placement") if signer_data else None
+
     temp_dir = tempfile.mkdtemp(prefix="sign_")
     local_pdf = os.path.join(temp_dir, "current.pdf")
     local_signed = None
@@ -1999,14 +2082,25 @@ async def sign_document(
         # Use frontend URL for QR code verification link
         verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
 
-        # Create placement object
-        placement = SignaturePlacement(
-            page=request_body.placement.page,
-            x=request_body.placement.x,
-            y=request_body.placement.y,
-            w=request_body.placement.w,
-            h=request_body.placement.h,
-        )
+        # Get placement from signer data (percentages) or request body (points)
+        if signer_placement:
+            # Convert signer's percentage placement to PDF points
+            placement = _get_signature_placement_from_signer(
+                signer_placement=signer_placement,
+                pdf_path=local_pdf,
+                page_count=doc_data.get("page_count", 1),
+            )
+            logger.info(f"Using signer placement from DB: {signer_placement}")
+        else:
+            # Fallback to request body placement (already in points)
+            placement = SignaturePlacement(
+                page=request_body.placement.page,
+                x=request_body.placement.x,
+                y=request_body.placement.y,
+                w=request_body.placement.w,
+                h=request_body.placement.h,
+            )
+            logger.info(f"Using request placement: page={placement.page}, x={placement.x}, y={placement.y}")
 
         # Prepare verification stamp info
         # NOTE: Hash is NOT included - it will be computed AFTER stamp is added
@@ -2172,21 +2266,25 @@ async def verify_signature(
     Users can scan the QR code or enter the verification ID to check
     if the document was signed through this system.
 
-    Rate limited to 10 requests per minute per IP.
+    This endpoint uses admin access (like signing links) but with no expiration.
+    Rate limited to 30 requests per minute per IP for abuse protection.
     """
-    # Rate limiting by IP address
+    # Rate limiting by IP address (generous limit for legitimate use)
     rate_limiter = get_verify_rate_limiter()
     client_ip = get_client_ip(request)
     allowed, retry_after = rate_limiter.is_allowed(f"verify:{client_ip}")
     if not allowed:
         raise RateLimitException(retry_after, "Too many verification requests. Please try again later.")
 
-    # Look up signing session by verification_id
-    result = supabase.table("signing_sessions").select(
-        "*, document_signers(name, email)"
-    ).eq("verification_id", verification_id).maybeSingle().execute()
+    # Look up signing session by verification_id via admin proxy (bypasses RLS)
+    # This gives same access level as signing links
+    session = await supabase.admin_select(
+        "signing_sessions",
+        {"verification_id": verification_id},
+        single=True,
+    )
 
-    if not result.data:
+    if not session:
         return VerifyResponse(
             valid=False,
             verification_id=verification_id,
@@ -2194,8 +2292,12 @@ async def verify_signature(
             message="Verification ID not found. The document may not have been signed through this system.",
         )
 
-    session = result.data
-    signer_data = session.get("document_signers", {})
+    # Get signer data via admin proxy
+    signer_data = {}
+    if session.get("signer_id"):
+        signer = await supabase.get_signer_by_id(session["signer_id"])
+        if signer:
+            signer_data = signer
 
     # Check if document was actually signed
     if not session.get("signed_at"):
@@ -2207,6 +2309,14 @@ async def verify_signature(
             message="This signing session exists but the document has not been signed yet.",
         )
 
+    # Mask phone number for privacy
+    phone_masked = None
+    phone = signer_data.get("phone")
+    if phone and len(phone) > 6:
+        phone_masked = phone[:4] + "***" + phone[-3:]
+    elif phone:
+        phone_masked = "***"
+
     return VerifyResponse(
         valid=True,
         verification_id=verification_id,
@@ -2214,8 +2324,9 @@ async def verify_signature(
         signer_name=signer_data.get("name"),
         signed_at=session.get("signed_at"),
         verification_method=session.get("otp_channel"),
+        phone_masked=phone_masked,
         status="valid",
-        message="Document signature verified. To verify file integrity, use POST /v1/verify/{id}/hash with your PDF's SHA-256 hash.",
+        message="Podpis je platný. Pro ověření integrity souboru použijte POST /v1/verify/{id}/hash s SHA-256 hashem PDF.",
     )
 
 
@@ -2236,7 +2347,7 @@ async def verify_document_hash(
     Users upload their PDF or compute its SHA-256 hash and submit it here
     to verify the document hasn't been modified since signing.
 
-    Rate limited to 10 requests per minute per IP.
+    Uses admin access (like signing links) for reliable database access.
     """
     # Rate limiting by IP address
     rate_limiter = get_verify_rate_limiter()
@@ -2245,15 +2356,16 @@ async def verify_document_hash(
     if not allowed:
         raise RateLimitException(retry_after, "Too many verification requests. Please try again later.")
 
-    # Look up signing session
-    result = supabase.table("signing_sessions").select(
-        "final_hash, signed_at"
-    ).eq("verification_id", verification_id).maybeSingle().execute()
+    # Look up signing session via admin proxy (bypasses RLS)
+    session = await supabase.admin_select(
+        "signing_sessions",
+        {"verification_id": verification_id},
+        single=True,
+    )
 
-    if not result.data:
+    if not session:
         raise NotFoundError("Verification ID", verification_id)
 
-    session = result.data
     expected_hash = session.get("final_hash")
 
     if not expected_hash:
