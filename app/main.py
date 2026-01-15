@@ -1985,7 +1985,8 @@ async def sign_document(
 
         # Generate verification ID (public, human-readable)
         verification_id = generate_verification_id()
-        verify_url = f"{settings.app_base_url}/verify/{verification_id}"
+        # Use frontend URL for QR code verification link
+        verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
 
         # Create placement object
         placement = SignaturePlacement(

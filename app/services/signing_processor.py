@@ -167,7 +167,8 @@ async def process_and_finalize_signature(
 
         # Prepare for signing
         verification_id = generate_verification_id()
-        verify_url = f"{settings.app_base_url}/verify/{verification_id}"
+        # Use frontend URL for QR code verification link
+        verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
         placement = SignaturePlacement(page=doc_data.get("page_count", 1), x=120, y=640, w=180, h=50)
 
         phone_masked = None
