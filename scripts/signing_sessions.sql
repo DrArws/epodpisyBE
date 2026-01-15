@@ -1,6 +1,7 @@
 -- ============================================================================
 -- signing_sessions table
 -- Stores signing session data for document signers (magic link tokens)
+-- Note: Full admin access is handled via admin-proxy Edge Function, not service_role
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS signing_sessions (
@@ -47,14 +48,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_signing_sessions_verification_id ON signin
 
 -- RLS Policies
 ALTER TABLE signing_sessions ENABLE ROW LEVEL SECURITY;
-
--- Service role can do everything
-CREATE POLICY "Service role full access on signing_sessions"
-    ON signing_sessions
-    FOR ALL
-    TO service_role
-    USING (TRUE)
-    WITH CHECK (TRUE);
 
 -- Anon can read sessions (for token validation and public verification)
 CREATE POLICY "Anon can read signing_sessions"

@@ -1,5 +1,6 @@
 -- Email templates table
 -- Run this in Supabase SQL Editor
+-- Note: Full admin access is handled via admin-proxy Edge Function, not service_role
 
 -- Create email_templates table
 CREATE TABLE email_templates (

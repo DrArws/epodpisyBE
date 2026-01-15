@@ -1,6 +1,7 @@
 -- ============================================================================
 -- document_events table
 -- Audit trail for all document-related events
+-- Note: Full admin access is handled via admin-proxy Edge Function, not service_role
 -- ============================================================================
 
 -- Event type enum
@@ -58,14 +59,6 @@ CREATE INDEX IF NOT EXISTS idx_document_events_doc_workspace
 
 -- RLS Policies
 ALTER TABLE document_events ENABLE ROW LEVEL SECURITY;
-
--- Service role can do everything
-CREATE POLICY "Service role full access on document_events"
-    ON document_events
-    FOR ALL
-    TO service_role
-    USING (TRUE)
-    WITH CHECK (TRUE);
 
 -- Anon can insert events (for signing flow)
 CREATE POLICY "Anon can insert document_events"
