@@ -112,6 +112,12 @@ class StampConfig(BaseModel):
     header_color: str = Field(default="#008040", description="Header text color (hex)")
     text_color: str = Field(default="#333333", description="Text color (hex)")
 
+    # URL settings
+    verify_url_base: Optional[str] = Field(
+        default=None,
+        description="Base URL for verification QR code (e.g., 'https://example.com/verify'). Falls back to SIGN_APP_URL/verify if not set."
+    )
+
     # Content settings
     include_qr: bool = Field(default=True, description="Show QR code")
     header_text: str = Field(

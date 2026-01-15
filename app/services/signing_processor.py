@@ -20,13 +20,14 @@ from app.email import get_email_service, EmailService
 
 logger = logging.getLogger(__name__)
 
-# Default signature placement (used when signer has no placement set)
-DEFAULT_PLACEMENT = {
+# Default signature placement in PDF points (used when signer has no placement set)
+# For A4 page (595 x 842 pt): bottom-right area
+DEFAULT_PLACEMENT_PT = {
     "page": 1,  # Will be overridden to last page
-    "x": 20,    # 20% from left
-    "y": 76,    # 76% from top (near bottom)
-    "width": 30,  # 30% of page width
-    "height": 6,  # 6% of page height
+    "x": 350,   # ~350pt from left (right side)
+    "y": 700,   # ~700pt from top (near bottom)
+    "w": 180,   # 180pt width
+    "h": 50,    # 50pt height
 }
 
 
@@ -37,50 +38,39 @@ def _get_signature_placement(
 ) -> SignaturePlacement:
     """
     Get signature placement from signer data or use defaults.
-    Converts percentage values (0-100) to PDF points.
+    Frontend saves coordinates in PDF points (pt).
 
     Args:
-        signer_placement: Placement from document_signers table (percentages)
-        pdf_path: Path to PDF file (to get page dimensions)
+        signer_placement: Placement from document_signers table (in pt: x, y, w, h)
+        pdf_path: Path to PDF file (for validation)
         page_count: Total page count
 
     Returns:
         SignaturePlacement in PDF points
     """
-    from app.pdf import get_pdf_signer
-
-    # Use signer placement or defaults
-    placement_data = signer_placement or DEFAULT_PLACEMENT.copy()
-
     # Get page number (default to last page)
-    page = placement_data.get("page", page_count)
+    if signer_placement:
+        page = signer_placement.get("page", page_count)
+    else:
+        page = page_count
+
     if page < 1:
         page = 1
     if page > page_count:
         page = page_count
 
-    # Get page dimensions
-    signer = get_pdf_signer()
-    try:
-        dimensions = signer.get_page_dimensions(pdf_path, page)
-        page_width = dimensions["width"]
-        page_height = dimensions["height"]
-    except Exception as e:
-        logger.warning(f"Failed to get page dimensions, using A4 defaults: {e}")
-        page_width = 595.0  # A4 width in points
-        page_height = 842.0  # A4 height in points
-
-    # Get percentage values (frontend uses 0-100 range)
-    x_pct = float(placement_data.get("x", DEFAULT_PLACEMENT["x"]))
-    y_pct = float(placement_data.get("y", DEFAULT_PLACEMENT["y"]))
-    w_pct = float(placement_data.get("width", DEFAULT_PLACEMENT["width"]))
-    h_pct = float(placement_data.get("height", DEFAULT_PLACEMENT["height"]))
-
-    # Convert percentages to PDF points
-    x_pt = page_width * (x_pct / 100.0)
-    y_pt = page_height * (y_pct / 100.0)
-    w_pt = page_width * (w_pct / 100.0)
-    h_pt = page_height * (h_pct / 100.0)
+    if signer_placement:
+        # Read pt values directly from signer placement
+        x_pt = float(signer_placement.get("x", DEFAULT_PLACEMENT_PT["x"]))
+        y_pt = float(signer_placement.get("y", DEFAULT_PLACEMENT_PT["y"]))
+        w_pt = float(signer_placement.get("w", signer_placement.get("width", DEFAULT_PLACEMENT_PT["w"])))
+        h_pt = float(signer_placement.get("h", signer_placement.get("height", DEFAULT_PLACEMENT_PT["h"])))
+    else:
+        # Use defaults
+        x_pt = DEFAULT_PLACEMENT_PT["x"]
+        y_pt = DEFAULT_PLACEMENT_PT["y"]
+        w_pt = DEFAULT_PLACEMENT_PT["w"]
+        h_pt = DEFAULT_PLACEMENT_PT["h"]
 
     # Ensure minimum dimensions
     w_pt = max(w_pt, 100)  # Minimum 100 points width
@@ -88,8 +78,7 @@ def _get_signature_placement(
 
     logger.info(
         f"Signature placement: page={page}, "
-        f"pct=({x_pct:.1f}%, {y_pct:.1f}%, {w_pct:.1f}%, {h_pct:.1f}%) -> "
-        f"pts=({x_pt:.1f}, {y_pt:.1f}, {w_pt:.1f}, {h_pt:.1f})"
+        f"pt=({x_pt:.1f}, {y_pt:.1f}, {w_pt:.1f}, {h_pt:.1f})"
     )
 
     return SignaturePlacement(
@@ -261,8 +250,11 @@ async def process_and_finalize_signature(
 
         # Prepare for signing
         verification_id = generate_verification_id()
-        # Use frontend URL for QR code verification link
-        verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
+        # Use stamp_config.verify_url_base if set, otherwise default to SIGN_APP_URL/verify
+        if stamp_config and stamp_config.verify_url_base:
+            verify_url = f"{stamp_config.verify_url_base.rstrip('/')}/{verification_id}"
+        else:
+            verify_url = f"{settings.get_sign_app_url()}/verify/{verification_id}"
 
         # Get placement from signer or use defaults
         placement = _get_signature_placement(

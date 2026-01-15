@@ -13,23 +13,19 @@ ADD COLUMN IF NOT EXISTS signature_placement JSONB;
 -- Comments
 -- ============================================================================
 
-COMMENT ON COLUMN document_signers.signature_placement IS 'Signature placement from frontend: {page, x, y, width, height} in percentages (0-100)';
+COMMENT ON COLUMN document_signers.signature_placement IS 'Signature placement from frontend: {page, x, y, w, h} in PDF points (pt)';
 
 -- ============================================================================
 -- Example signature_placement values:
 -- ============================================================================
--- Frontend saves percentages (0-100 range):
+-- Frontend saves coordinates in PDF points (pt):
 -- {
 --   "page": 1,
---   "x": 10.5,      -- 10.5% from left edge
---   "y": 80.0,      -- 80% from top edge
---   "width": 25.0,  -- 25% of page width
---   "height": 8.0   -- 8% of page height
+--   "x": 350,       -- 350pt from left edge
+--   "y": 700,       -- 700pt from top edge
+--   "w": 180,       -- 180pt width
+--   "h": 50         -- 50pt height
 -- }
 --
--- Backend converts to PDF points using page dimensions:
--- For A4 (595 x 842 points):
---   x_points = 595 * 0.105 = 62.5
---   y_points = 842 * 0.80 = 673.6
---   width_points = 595 * 0.25 = 148.75
---   height_points = 842 * 0.08 = 67.36
+-- For A4 page: 595 x 842 points
+-- Backend reads these values directly (no conversion needed)
