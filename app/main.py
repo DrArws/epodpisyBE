@@ -65,6 +65,7 @@ from app.models import (
     EmailTemplateContext,
     AuthorInfo,
     PdfUrlResponse,
+    StampConfig,
 )
 from app.gcs import get_gcs_client, GCSClient, normalize_storage_path
 from app.supabase_client import get_supabase_client, SupabaseClient, get_user_token
@@ -1975,6 +1976,16 @@ async def sign_document(
     if not current_pdf_path:
         raise ValidationException("Document has no PDF to sign")
 
+    # Get workspace stamp configuration
+    stamp_config: Optional[StampConfig] = None
+    try:
+        workspace_data = await supabase.get_workspace_admin(session.workspace_id)
+        if workspace_data and workspace_data.get("stamp_config"):
+            stamp_config = StampConfig(**workspace_data["stamp_config"])
+            logger.info(f"Using workspace stamp_config: position={stamp_config.position}")
+    except Exception as e:
+        logger.warning(f"Failed to load workspace stamp_config, using defaults: {e}")
+
     temp_dir = tempfile.mkdtemp(prefix="sign_")
     local_pdf = os.path.join(temp_dir, "current.pdf")
     local_signed = None
@@ -2018,7 +2029,8 @@ async def sign_document(
             document_id=session.document_id,
             verification_method=otp_channel,
             phone_masked=phone_masked,
-            include_qr=True,
+            include_qr=stamp_config.include_qr if stamp_config else True,
+            config=stamp_config,
         )
 
         # Sign PDF with PAdES digital signature + visual overlay

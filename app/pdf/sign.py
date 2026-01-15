@@ -9,9 +9,12 @@ import logging
 import os
 import uuid
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models import StampConfig
 
 import fitz  # PyMuPDF
 import qrcode
@@ -161,6 +164,8 @@ class StampInfo:
     verification_method: Optional[str] = None  # "sms" or "whatsapp"
     phone_masked: Optional[str] = None  # e.g., "+420***789"
     include_qr: bool = True
+    # Stamp configuration from workspace settings
+    config: Optional["StampConfig"] = None
 
 
 class SigningError(Exception):
@@ -460,34 +465,37 @@ class PDFSigner:
         page_width: float,
     ) -> None:
         """
-        Add verification stamp below the signature with QR code.
+        Add verification stamp with QR code.
+        Position and style are controlled by stamp_info.config (StampConfig).
 
         Args:
             page: PyMuPDF page object
-            stamp_info: Stamp information
-            signature_rect: Rectangle of the signature (for positioning)
+            stamp_info: Stamp information including config
+            signature_rect: Rectangle of the signature (for relative positioning)
             page_height: Page height in points
             page_width: Page width in points
         """
-        # Stamp dimensions
-        stamp_width = 200
-        stamp_height = 75
-        qr_size = 50 if stamp_info.include_qr else 0
+        # Import StampConfig here to avoid circular imports
+        from app.models import StampConfig, StampPosition
+
+        # Get config or use defaults
+        config = stamp_info.config or StampConfig()
+
+        # Stamp dimensions from config
+        stamp_width = config.width
+        stamp_height = config.height
+        qr_size = config.qr_size if config.include_qr else 0
         padding = 6
-        margin_top = 8  # Gap between signature and stamp
 
-        # Position stamp below signature, aligned to left edge
-        stamp_x = signature_rect.x0
-        stamp_y = signature_rect.y1 + margin_top
-
-        # Check if stamp fits on page, if not try above signature
-        if stamp_y + stamp_height > page_height - 20:
-            stamp_y = signature_rect.y0 - stamp_height - margin_top
-
-        # If still doesn't fit, place at bottom right of page
-        if stamp_y < 20:
-            stamp_x = page_width - stamp_width - 20
-            stamp_y = page_height - stamp_height - 20
+        # Calculate stamp position based on config.position
+        stamp_x, stamp_y = self._calculate_stamp_position(
+            config=config,
+            signature_rect=signature_rect,
+            stamp_width=stamp_width,
+            stamp_height=stamp_height,
+            page_width=page_width,
+            page_height=page_height,
+        )
 
         stamp_rect = fitz.Rect(
             stamp_x,
@@ -496,12 +504,13 @@ class PDFSigner:
             stamp_y + stamp_height,
         )
 
-        # Colors
-        border_color = (0.0, 0.4, 0.2)  # Dark green
-        bg_color = (0.96, 0.99, 0.96)  # Very light green
-        header_color = (0.0, 0.5, 0.25)  # Green
-        text_color = (0.2, 0.2, 0.2)  # Dark gray
+        # Colors from config (convert hex to RGB tuples)
+        border_color = config.hex_to_rgb(config.border_color)
+        bg_color = config.hex_to_rgb(config.bg_color)
+        header_color = config.hex_to_rgb(config.header_color)
+        text_color = config.hex_to_rgb(config.text_color)
         light_gray = (0.5, 0.5, 0.5)
+        warning_color = (0.6, 0.3, 0.3)  # Reddish
 
         # Draw background rectangle with border
         shape = page.new_shape()
@@ -514,42 +523,44 @@ class PDFSigner:
         shape.commit()
 
         # Calculate text area (leave space for QR on the right)
-        text_width = stamp_width - qr_size - padding * 3 if stamp_info.include_qr else stamp_width - padding * 2
+        text_width = stamp_width - qr_size - padding * 3 if config.include_qr else stamp_width - padding * 2
         text_x = stamp_x + padding
 
-        # Prepare text content
+        # Prepare text content based on config visibility settings
         lines = []
 
-        # Line 1: Header
+        # Line 1: Header (always shown)
         lines.append({
-            "text": "ELEKTRONICKY PODEPSANO",
+            "text": config.header_text,
             "size": 7,
             "color": header_color,
             "bold": True,
         })
 
         # Line 2: Signer name
-        lines.append({
-            "text": stamp_info.signer_name,
-            "size": 8,
-            "color": text_color,
-            "bold": True,
-        })
+        if config.show_signer_name:
+            lines.append({
+                "text": stamp_info.signer_name,
+                "size": 8,
+                "color": text_color,
+                "bold": True,
+            })
 
         # Line 3: Date/time
-        if isinstance(stamp_info.signed_at, str):
-            dt_str = stamp_info.signed_at
-        else:
-            dt_str = stamp_info.signed_at.strftime("%d.%m.%Y %H:%M:%S UTC")
-        lines.append({
-            "text": dt_str,
-            "size": 7,
-            "color": text_color,
-            "bold": False,
-        })
+        if config.show_date:
+            if isinstance(stamp_info.signed_at, str):
+                dt_str = stamp_info.signed_at
+            else:
+                dt_str = stamp_info.signed_at.strftime("%d.%m.%Y %H:%M:%S UTC")
+            lines.append({
+                "text": dt_str,
+                "size": 7,
+                "color": text_color,
+                "bold": False,
+            })
 
         # Line 4: Verification method
-        if stamp_info.verification_method:
+        if config.show_verification_method and stamp_info.verification_method:
             method = "SMS OTP" if stamp_info.verification_method == "sms" else "WhatsApp OTP"
             phone = f" ({stamp_info.phone_masked})" if stamp_info.phone_masked else ""
             lines.append({
@@ -560,20 +571,22 @@ class PDFSigner:
             })
 
         # Line 5: Verification ID
-        lines.append({
-            "text": f"ID: {stamp_info.verification_id}",
-            "size": 6,
-            "color": light_gray,
-            "bold": False,
-        })
+        if config.show_verification_id:
+            lines.append({
+                "text": f"ID: {stamp_info.verification_id}",
+                "size": 6,
+                "color": light_gray,
+                "bold": False,
+            })
 
         # Line 6: Warning
-        lines.append({
-            "text": "Zmena zneplatnuje podpis",
-            "size": 5,
-            "color": (0.6, 0.3, 0.3),  # Reddish
-            "bold": False,
-        })
+        if config.show_warning:
+            lines.append({
+                "text": config.warning_text,
+                "size": 5,
+                "color": warning_color,
+                "bold": False,
+            })
 
         # Find fonts with Czech diacritics support
         font_regular = _find_font("regular")
@@ -618,7 +631,7 @@ class PDFSigner:
             y_offset += line["size"] + 3
 
         # Add QR code
-        if stamp_info.include_qr:
+        if config.include_qr:
             qr_rect = fitz.Rect(
                 stamp_x + stamp_width - qr_size - padding,
                 stamp_y + padding,
@@ -627,12 +640,86 @@ class PDFSigner:
             )
 
             try:
-                qr_bytes = self._generate_qr_code(stamp_info.verify_url, qr_size)
+                qr_bytes = self._generate_qr_code(stamp_info.verify_url, int(qr_size))
                 page.insert_image(qr_rect, stream=qr_bytes)
             except Exception as e:
                 logger.warning(f"Failed to generate QR code: {e}")
 
-        logger.info(f"Added verification stamp: {stamp_info.verification_id}")
+        logger.info(f"Added verification stamp: {stamp_info.verification_id} at ({stamp_x:.0f}, {stamp_y:.0f})")
+
+    def _calculate_stamp_position(
+        self,
+        config: "StampConfig",
+        signature_rect: fitz.Rect,
+        stamp_width: float,
+        stamp_height: float,
+        page_width: float,
+        page_height: float,
+    ) -> Tuple[float, float]:
+        """
+        Calculate stamp position based on config.
+
+        Returns:
+            Tuple of (x, y) coordinates for stamp placement.
+        """
+        from app.models import StampPosition
+
+        margin = 20  # Page margin
+
+        if config.position == StampPosition.FIXED:
+            # Fixed position from config
+            stamp_x = config.x if config.x is not None else margin
+            stamp_y = config.y if config.y is not None else margin
+            return stamp_x, stamp_y
+
+        elif config.position == StampPosition.BOTTOM_RIGHT:
+            stamp_x = page_width - stamp_width - margin
+            stamp_y = page_height - stamp_height - margin
+            return stamp_x, stamp_y
+
+        elif config.position == StampPosition.BOTTOM_LEFT:
+            stamp_x = margin
+            stamp_y = page_height - stamp_height - margin
+            return stamp_x, stamp_y
+
+        elif config.position == StampPosition.ABOVE_SIGNATURE:
+            stamp_x = signature_rect.x0 + config.offset_x
+            stamp_y = signature_rect.y0 - stamp_height - config.offset_y
+            # Ensure stamp stays on page
+            if stamp_y < margin:
+                stamp_y = margin
+            return stamp_x, stamp_y
+
+        elif config.position == StampPosition.LEFT_OF_SIGNATURE:
+            stamp_x = signature_rect.x0 - stamp_width - config.offset_x
+            stamp_y = signature_rect.y0 + config.offset_y
+            # Ensure stamp stays on page
+            if stamp_x < margin:
+                stamp_x = margin
+            return stamp_x, stamp_y
+
+        elif config.position == StampPosition.RIGHT_OF_SIGNATURE:
+            stamp_x = signature_rect.x1 + config.offset_x
+            stamp_y = signature_rect.y0 + config.offset_y
+            # Ensure stamp stays on page
+            if stamp_x + stamp_width > page_width - margin:
+                stamp_x = page_width - stamp_width - margin
+            return stamp_x, stamp_y
+
+        else:  # BELOW_SIGNATURE (default)
+            stamp_x = signature_rect.x0 + config.offset_x
+            stamp_y = signature_rect.y1 + config.offset_y
+
+            # Check if stamp fits on page, if not try above signature
+            if stamp_y + stamp_height > page_height - margin:
+                stamp_y = signature_rect.y0 - stamp_height - config.offset_y
+
+            # If still doesn't fit, place at bottom right of page
+            if stamp_y < margin:
+                stamp_x = page_width - stamp_width - margin
+                stamp_y = page_height - stamp_height - margin
+
+            return stamp_x, stamp_y
 
     def _generate_qr_code(self, url: str, size: int) -> bytes:
         """

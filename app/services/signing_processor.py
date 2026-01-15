@@ -15,7 +15,7 @@ from app.pdf import get_pdf_signer, StampInfo, generate_verification_id, Placeme
 from app.pdf.sign import SignaturePlacement, SigningError
 from app.utils.security import compute_file_hash
 from app.utils.datetime_utils import utc_now
-from app.models import SigningSession, SignerStatus, SignCompleteResponse, EmailTemplateContext
+from app.models import SigningSession, SignerStatus, SignCompleteResponse, EmailTemplateContext, StampConfig
 from app.email import get_email_service, EmailService
 
 logger = logging.getLogger(__name__)
@@ -157,6 +157,16 @@ async def process_and_finalize_signature(
         if not session_data:
             raise Exception("Session data not found while processing signature.")
 
+        # Get workspace stamp configuration
+        stamp_config: Optional[StampConfig] = None
+        try:
+            workspace_data = await supabase.get_workspace_admin(session.workspace_id)
+            if workspace_data and workspace_data.get("stamp_config"):
+                stamp_config = StampConfig(**workspace_data["stamp_config"])
+                logger.info(f"Using workspace stamp_config: position={stamp_config.position}")
+        except Exception as e:
+            logger.warning(f"Failed to load workspace stamp_config, using defaults: {e}")
+
         # Download the current PDF
         current_pdf_path = doc_data.get("gcs_signed_path") or doc_data.get("gcs_pdf_path")
         if not current_pdf_path:
@@ -186,7 +196,8 @@ async def process_and_finalize_signature(
             document_id=session.document_id,
             verification_method=session_data.get("otp_channel"),
             phone_masked=phone_masked,
-            include_qr=True,
+            include_qr=stamp_config.include_qr if stamp_config else True,
+            config=stamp_config,
         )
 
         # Sign the PDF

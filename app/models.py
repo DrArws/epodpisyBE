@@ -57,6 +57,91 @@ class EmailTemplateType(str, Enum):
     ALL_SIGNED = "ALL_SIGNED"
 
 
+class StampPosition(str, Enum):
+    """Position of verification stamp relative to signature."""
+    BELOW_SIGNATURE = "below_signature"  # Default: below the signature
+    ABOVE_SIGNATURE = "above_signature"  # Above the signature
+    LEFT_OF_SIGNATURE = "left_of_signature"  # Left of signature
+    RIGHT_OF_SIGNATURE = "right_of_signature"  # Right of signature
+    FIXED = "fixed"  # Fixed position (uses x, y coordinates)
+    BOTTOM_RIGHT = "bottom_right"  # Fixed bottom-right corner
+    BOTTOM_LEFT = "bottom_left"  # Fixed bottom-left corner
+
+
+class StampConfig(BaseModel):
+    """
+    Configuration for verification stamp (doložka) appearance and position.
+    Stored in workspace.stamp_config JSONB column.
+    """
+    # Position settings
+    position: StampPosition = Field(
+        default=StampPosition.BELOW_SIGNATURE,
+        description="Stamp position relative to signature"
+    )
+    page: Optional[str] = Field(
+        default=None,
+        description="Page for fixed position: 'last', 'first', 'signature', or page number"
+    )
+    x: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="X coordinate in points (for fixed position)"
+    )
+    y: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Y coordinate in points (for fixed position)"
+    )
+    offset_x: float = Field(
+        default=0,
+        description="X offset from signature in points"
+    )
+    offset_y: float = Field(
+        default=8,
+        description="Y offset from signature in points (gap)"
+    )
+
+    # Size settings
+    width: float = Field(default=200, gt=0, description="Stamp width in points")
+    height: float = Field(default=75, gt=0, description="Stamp height in points")
+    qr_size: float = Field(default=50, ge=0, description="QR code size in points (0 to hide)")
+
+    # Style settings (hex colors)
+    border_color: str = Field(default="#006633", description="Border color (hex)")
+    bg_color: str = Field(default="#f5fff5", description="Background color (hex)")
+    header_color: str = Field(default="#008040", description="Header text color (hex)")
+    text_color: str = Field(default="#333333", description="Text color (hex)")
+
+    # Content settings
+    include_qr: bool = Field(default=True, description="Show QR code")
+    header_text: str = Field(
+        default="ELEKTRONICKY PODEPSANO",
+        max_length=50,
+        description="Header text"
+    )
+    show_signer_name: bool = Field(default=True, description="Show signer name")
+    show_date: bool = Field(default=True, description="Show signing date/time")
+    show_verification_method: bool = Field(default=True, description="Show OTP method")
+    show_verification_id: bool = Field(default=True, description="Show verification ID")
+    show_warning: bool = Field(default=True, description="Show tamper warning text")
+    warning_text: str = Field(
+        default="Zmena zneplatnuje podpis",
+        max_length=50,
+        description="Warning text"
+    )
+
+    @staticmethod
+    def hex_to_rgb(hex_color: str) -> tuple:
+        """Convert hex color to RGB tuple (0-1 range for PyMuPDF)."""
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) != 6:
+            return (0.0, 0.0, 0.0)  # Default to black on invalid
+        r = int(hex_color[0:2], 16) / 255.0
+        g = int(hex_color[2:4], 16) / 255.0
+        b = int(hex_color[4:6], 16) / 255.0
+        return (r, g, b)
+
+
 # Request Models
 class UploadUrlRequest(BaseRequest):
     filename: str = Field(..., min_length=1, max_length=255)
