@@ -96,6 +96,7 @@ public class Main {
     private static int TSA_READ_TIMEOUT_MS;
     private static int TSA_MAX_RETRIES;
     private static boolean TSA_FAIL_OPEN;  // Fallback to BASELINE-B if TSA fails
+    private static boolean FORCE_BASELINE_B;  // Debug: skip TSA entirely, use BASELINE-B
 
     // Config error holder for deferred exit (static init can't call System.exit)
     private static String CONFIG_ERROR = null;
@@ -152,8 +153,12 @@ public class Main {
         TSA_MAX_RETRIES = getEnvOrDefaultInt("TSA_MAX_RETRIES", DEFAULT_TSA_MAX_RETRIES);
 
         TSA_FAIL_OPEN = "true".equalsIgnoreCase(getEnvOrDefault("TSA_FAIL_OPEN", "false"));
+        FORCE_BASELINE_B = "true".equalsIgnoreCase(getEnvOrDefault("FORCE_BASELINE_B", "false"));
 
         LOG.info("TSA primary: {} (timeout: {}ms connect, {}ms read)", TSA_URL, TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS);
+        if (FORCE_BASELINE_B) {
+            LOG.warn("FORCE_BASELINE_B=true: Skipping TSA, using BASELINE-B (for debugging)");
+        }
         LOG.info("TSA fallback: {}", TSA_FALLBACK_URL);
         LOG.info("TSA fail-open mode: {} (fallback to BASELINE-B if TSA unavailable)", TSA_FAIL_OPEN);
 
@@ -349,9 +354,15 @@ public class Main {
             audit.setCertificateFingerprint(computeCertFingerprint(signingCert));
             LOG.info("KMS_INIT_OK: Certificate loaded successfully");
 
-            // Configure PAdES parameters - start with BASELINE-T (with timestamp)
+            // Configure PAdES parameters
             PAdESSignatureParameters parameters = new PAdESSignatureParameters();
-            parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_T);
+            // Use BASELINE-B for debugging if FORCE_BASELINE_B=true, otherwise BASELINE-T
+            if (FORCE_BASELINE_B) {
+                parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_B);
+                LOG.info("Using PAdES-BASELINE-B (no timestamp) due to FORCE_BASELINE_B=true");
+            } else {
+                parameters.setSignatureLevel(SignatureLevel.PAdES_BASELINE_T);
+            }
             parameters.setDigestAlgorithm(DigestAlgorithm.SHA256);
             parameters.setSigningCertificate(signingCert);
             parameters.setCertificateChain(privateKey.getCertificateChain());
@@ -373,12 +384,15 @@ public class Main {
             // Create PAdES service
             PAdESService service = new PAdESService(certificateVerifier);
 
-            // Create FallbackTSPSource with proper timeouts
-            FallbackTSPSource tspSource = new FallbackTSPSource(
-                TSA_URL, TSA_FALLBACK_URL,
-                TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS, TSA_MAX_RETRIES
-            );
-            service.setTspSource(tspSource);
+            // Create FallbackTSPSource with proper timeouts (unless FORCE_BASELINE_B)
+            FallbackTSPSource tspSource = null;
+            if (!FORCE_BASELINE_B) {
+                tspSource = new FallbackTSPSource(
+                    TSA_URL, TSA_FALLBACK_URL,
+                    TSA_CONNECT_TIMEOUT_MS, TSA_READ_TIMEOUT_MS, TSA_MAX_RETRIES
+                );
+                service.setTspSource(tspSource);
+            }
 
             // Load input document
             DSSDocument toSignDocument = new FileDocument(inputPath);
@@ -398,27 +412,34 @@ public class Main {
             audit.setKmsLatencyMs(kmsTime);
             audit.setSignatureBytes(signatureValue.getValue().length);
 
-            // Embed signature with timestamp
-            LOG.info("Requesting timestamp from TSA...");
+            // Embed signature (with or without timestamp)
             DSSDocument signedDocument;
-            boolean tsaApplied = true;
-            String signatureProfile = "PAdES-BASELINE-T";
+            boolean tsaApplied = !FORCE_BASELINE_B;
+            String signatureProfile = FORCE_BASELINE_B ? "PAdES-BASELINE-B" : "PAdES-BASELINE-T";
 
-            try {
+            if (FORCE_BASELINE_B) {
+                // BASELINE-B: no timestamp
+                LOG.info("Signing document (BASELINE-B, no timestamp)...");
                 signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
+                LOG.info("BASELINE_B_OK: Document signed without timestamp");
+            } else {
+                // BASELINE-T: with timestamp
+                LOG.info("Requesting timestamp from TSA...");
+                try {
+                    signedDocument = service.signDocument(toSignDocument, parameters, signatureValue);
 
-                // Record TSA metrics from FallbackTSPSource
-                audit.setTsaUrlUsed(tspSource.getUrlUsed());
-                audit.setTsaFallbackUsed(tspSource.isFallbackUsed());
-                audit.setTsaQualified(tspSource.isQualified());
-                audit.setTsaLatencyMs(tspSource.getTotalLatencyMs());
-                audit.setTsaAttempts(tspSource.getTotalAttempts());
-                audit.setTsaTokenTime(Instant.now());
+                    // Record TSA metrics from FallbackTSPSource
+                    audit.setTsaUrlUsed(tspSource.getUrlUsed());
+                    audit.setTsaFallbackUsed(tspSource.isFallbackUsed());
+                    audit.setTsaQualified(tspSource.isQualified());
+                    audit.setTsaLatencyMs(tspSource.getTotalLatencyMs());
+                    audit.setTsaAttempts(tspSource.getTotalAttempts());
+                    audit.setTsaTokenTime(Instant.now());
 
-                LOG.info("TSA_OK: Timestamp applied from {} (qualified: {}, fallback: {})",
-                    tspSource.getUrlUsed(), tspSource.isQualified(), tspSource.isFallbackUsed());
+                    LOG.info("TSA_OK: Timestamp applied from {} (qualified: {}, fallback: {})",
+                        tspSource.getUrlUsed(), tspSource.isQualified(), tspSource.isFallbackUsed());
 
-            } catch (FallbackTSPSource.TsaException e) {
+                } catch (FallbackTSPSource.TsaException e) {
                 // TSA failed - check if fail-open mode is enabled
                 LOG.error("TSA_FAILED: {} (error type: {})", e.getMessage(), e.getErrorType());
 
@@ -457,6 +478,7 @@ public class Main {
                         e.getHttpStatus(),
                         e
                     );
+                }
                 }
             }
 
