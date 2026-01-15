@@ -105,29 +105,55 @@ class SupabaseClient:
             return result["data"][0] if result["data"] else {}
         return result
 
-    async def admin_update(self, table_name: str, record_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def admin_update(
+        self, table_name: str, record_id: str, data: Dict[str, Any], max_retries: int = 2
+    ) -> Dict[str, Any]:
         """
         Update data via admin-proxy Edge Function (bypasses RLS).
+        Includes retry logic for transient failures.
         """
+        import asyncio
+
         url = f"/functions/v1/admin-proxy/{table_name}/{record_id}"
         headers = {
             "Content-Type": "application/json",
             "X-Admin-Secret": self.settings.admin_api_secret,
         }
 
-        logger.info(f"admin_update: PATCH {url} for {table_name}/{record_id[:8]}...")
-        try:
-            response = await self._http_client.patch(url, headers=headers, json=data)
-            logger.info(f"admin_update: response status={response.status_code}")
-            if response.status_code != 200:
-                logger.warning(f"admin_update: response body='{response.text}'")
-            response.raise_for_status()
-            result = response.json()
-            logger.info(f"admin_update: success for {table_name}/{record_id[:8]}...")
-            return result
-        except Exception as e:
-            logger.error(f"admin_update: FAILED for {table_name}/{record_id[:8]}..., error={e}")
-            raise
+        # Log payload keys for debugging (not values to avoid leaking data)
+        payload_keys = list(data.keys())
+        logger.info(f"admin_update: PATCH {url} for {table_name}/{record_id[:8]}..., keys={payload_keys}")
+
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._http_client.patch(url, headers=headers, json=data)
+                logger.info(f"admin_update: response status={response.status_code} (attempt {attempt + 1})")
+
+                if response.status_code != 200:
+                    logger.warning(f"admin_update: response body='{response.text[:500]}'")
+
+                response.raise_for_status()
+                result = response.json()
+                logger.info(f"admin_update: success for {table_name}/{record_id[:8]}...")
+                return result
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait_time = 0.5 * (2 ** attempt)  # 0.5s, 1s
+                    logger.warning(
+                        f"admin_update: attempt {attempt + 1} failed for {table_name}/{record_id[:8]}..., "
+                        f"error={e}, retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"admin_update: FAILED after {max_retries + 1} attempts for "
+                        f"{table_name}/{record_id[:8]}..., error={e}"
+                    )
+
+        raise last_error
 
     async def admin_select(
         self,
