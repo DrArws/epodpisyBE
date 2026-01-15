@@ -2272,11 +2272,32 @@ async def verify_signature(
 
     # Look up signing session by verification_id via admin proxy (bypasses RLS)
     # This gives same access level as signing links
-    session = await supabase.admin_select(
-        "signing_sessions",
-        {"verification_id": verification_id},
-        single=True,
-    )
+    try:
+        session = await supabase.admin_select(
+            "signing_sessions",
+            {"verification_id": verification_id},
+            single=True,
+        )
+    except Exception as e:
+        logger.error(f"verify: admin_select failed for {verification_id}: {e}")
+        # Fallback: try direct query with service role (if available)
+        try:
+            result = supabase.client.table("signing_sessions").select("*").eq(
+                "verification_id", verification_id
+            ).maybe_single().execute()
+            session = result.data
+            logger.info(f"verify: fallback query succeeded for {verification_id}")
+        except Exception as e2:
+            logger.error(f"verify: fallback query also failed: {e2}")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "valid": False,
+                    "verification_id": verification_id,
+                    "status": "service_unavailable",
+                    "message": "Ověřovací služba je dočasně nedostupná. Zkuste to prosím později.",
+                }
+            )
 
     if not session:
         raise HTTPException(
@@ -2289,12 +2310,16 @@ async def verify_signature(
             }
         )
 
-    # Get signer data via admin proxy
+    # Get signer data via admin proxy (with fallback)
     signer_data = {}
     if session.get("signer_id"):
-        signer = await supabase.get_signer_by_id(session["signer_id"])
-        if signer:
-            signer_data = signer
+        try:
+            signer = await supabase.get_signer_by_id(session["signer_id"])
+            if signer:
+                signer_data = signer
+        except Exception as e:
+            logger.warning(f"verify: failed to get signer data: {e}")
+            # Continue without signer data - not critical for verification
 
     # Check if document was actually signed
     if not session.get("signed_at"):
@@ -2354,11 +2379,26 @@ async def verify_document_hash(
         raise RateLimitException(retry_after, "Too many verification requests. Please try again later.")
 
     # Look up signing session via admin proxy (bypasses RLS)
-    session = await supabase.admin_select(
-        "signing_sessions",
-        {"verification_id": verification_id},
-        single=True,
-    )
+    try:
+        session = await supabase.admin_select(
+            "signing_sessions",
+            {"verification_id": verification_id},
+            single=True,
+        )
+    except Exception as e:
+        logger.error(f"verify_hash: admin_select failed for {verification_id}: {e}")
+        # Fallback: try direct query with service role
+        try:
+            result = supabase.client.table("signing_sessions").select("*").eq(
+                "verification_id", verification_id
+            ).maybe_single().execute()
+            session = result.data
+        except Exception as e2:
+            logger.error(f"verify_hash: fallback query also failed: {e2}")
+            raise HTTPException(
+                status_code=503,
+                detail="Ověřovací služba je dočasně nedostupná."
+            )
 
     if not session:
         raise NotFoundError("Verification ID", verification_id)
