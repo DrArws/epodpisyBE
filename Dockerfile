@@ -8,12 +8,13 @@ FROM maven:3.9-eclipse-temurin-17 as java-builder
 
 WORKDIR /build
 
-# Copy PAdES signer source
+# 1️⃣ Copy pom.xml first and download dependencies (cached layer)
 COPY pades-kms-signer/pom.xml ./pom.xml
-COPY pades-kms-signer/src ./src
+RUN mvn dependency:go-offline -q
 
-# Build the JAR (skip tests for faster build)
-RUN mvn -q -DskipTests package
+# 2️⃣ Then copy source and build (only rebuilds when code changes)
+COPY pades-kms-signer/src ./src
+RUN mvn -q -DskipTests package -o
 
 # ============================================================================
 # Stage 2: Python Builder
