@@ -1,16 +1,24 @@
 package cz.drbacon.pades;
 
 import eu.europa.esig.dss.enumerations.DigestAlgorithm;
+import eu.europa.esig.dss.enumerations.ImageScaling;
 import eu.europa.esig.dss.enumerations.Indication;
 import eu.europa.esig.dss.enumerations.SignatureLevel;
 import eu.europa.esig.dss.enumerations.SignaturePackaging;
 import eu.europa.esig.dss.enumerations.SubIndication;
+import eu.europa.esig.dss.enumerations.VisualSignatureAlignmentHorizontal;
+import eu.europa.esig.dss.enumerations.VisualSignatureAlignmentVertical;
+import eu.europa.esig.dss.enumerations.VisualSignatureRotation;
 import eu.europa.esig.dss.model.DSSDocument;
 import eu.europa.esig.dss.model.FileDocument;
+import eu.europa.esig.dss.model.InMemoryDocument;
 import eu.europa.esig.dss.model.SignatureValue;
 import eu.europa.esig.dss.model.ToBeSigned;
 import eu.europa.esig.dss.model.x509.CertificateToken;
 import eu.europa.esig.dss.pades.PAdESSignatureParameters;
+import eu.europa.esig.dss.pades.SignatureFieldParameters;
+import eu.europa.esig.dss.pades.SignatureImageParameters;
+import eu.europa.esig.dss.pades.SignatureImageTextParameters;
 import eu.europa.esig.dss.pades.signature.PAdESService;
 import eu.europa.esig.dss.pades.validation.PDFDocumentValidator;
 import eu.europa.esig.dss.simplereport.SimpleReport;
@@ -30,12 +38,30 @@ import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.Map;
 
 /**
- * PAdES PDF Signer using Google Cloud KMS.
+ * PAdES PDF Signer using Google Cloud KMS with visible signature appearance.
  *
- * Usage: java -jar pades-kms-signer.jar input.pdf signed.pdf [signer-name]
+ * Usage (legacy - positional args):
+ *   java -jar pades-kms-signer.jar input.pdf signed.pdf [signer-name]
+ *
+ * Usage (new - with visual signature):
+ *   java -jar pades-kms-signer.jar --input input.pdf --output signed.pdf --signer "Name" \
+ *     --image signature.png --page 1 --x 350 --y 700 --w 180 --h 50
+ *
+ * Parameters:
+ *   --input   Input PDF file path (required)
+ *   --output  Output signed PDF file path (required)
+ *   --signer  Signer display name (default: "Elektronicky podepsano")
+ *   --image   Signature image file path (PNG) - if provided, creates visible signature
+ *   --page    Page number for signature (1-indexed, default: 1)
+ *   --x       X coordinate in PDF points from left edge (default: 0)
+ *   --y       Y coordinate in PDF points from BOTTOM edge (default: 0)
+ *   --w       Width in PDF points (default: 200)
+ *   --h       Height in PDF points (default: 50)
  *
  * Environment variables:
  *   KMS_KEY_NAME          - Full KMS key resource name (required)
@@ -184,6 +210,51 @@ public class Main {
         return defaultValue;
     }
 
+    /**
+     * Configuration for visual signature appearance.
+     */
+    private static class VisualConfig {
+        String imagePath;      // Path to signature image (PNG)
+        int page = 1;          // Page number (1-indexed)
+        float x = 0;           // X from left in points
+        float y = 0;           // Y from bottom in points
+        float w = 200;         // Width in points
+        float h = 50;          // Height in points
+
+        boolean hasImage() {
+            return imagePath != null && !imagePath.isEmpty();
+        }
+    }
+
+    /**
+     * Parse command line arguments. Supports both legacy positional and new named args.
+     */
+    private static Map<String, String> parseArgs(String[] args) {
+        Map<String, String> result = new HashMap<>();
+
+        // Check if using new named argument style (starts with --)
+        boolean namedStyle = args.length > 0 && args[0].startsWith("--");
+
+        if (namedStyle) {
+            // Parse named arguments: --key value
+            for (int i = 0; i < args.length; i++) {
+                if (args[i].startsWith("--") && i + 1 < args.length) {
+                    String key = args[i].substring(2);  // Remove --
+                    String value = args[i + 1];
+                    result.put(key, value);
+                    i++;  // Skip value
+                }
+            }
+        } else {
+            // Legacy positional: input.pdf output.pdf [signer-name]
+            if (args.length >= 1) result.put("input", args[0]);
+            if (args.length >= 2) result.put("output", args[1]);
+            if (args.length >= 3) result.put("signer", args[2]);
+        }
+
+        return result;
+    }
+
     public static void main(String[] args) {
         AuditRecord audit = new AuditRecord();
         int exitCode = EXIT_SUCCESS;
@@ -197,22 +268,53 @@ public class Main {
                 return;
             }
 
-            if (args.length < 2) {
-                System.err.println("Usage: java -jar pades-kms-signer.jar <input.pdf> <output.pdf> [signer-name]");
-                audit.addError("USAGE_ERROR: Missing required arguments");
+            // Parse arguments
+            Map<String, String> parsedArgs = parseArgs(args);
+
+            String inputPath = parsedArgs.get("input");
+            String outputPath = parsedArgs.get("output");
+            String signerName = parsedArgs.getOrDefault("signer", "Elektronicky podepsano");
+
+            if (inputPath == null || outputPath == null) {
+                System.err.println("Usage: java -jar pades-kms-signer.jar --input <input.pdf> --output <output.pdf> [--signer name]");
+                System.err.println("       [--image signature.png --page 1 --x 350 --y 700 --w 180 --h 50]");
+                System.err.println("Legacy: java -jar pades-kms-signer.jar <input.pdf> <output.pdf> [signer-name]");
+                audit.addError("USAGE_ERROR: Missing required arguments (--input and --output)");
                 audit.setSuccess(false);
                 writeAuditAndExit(audit, EXIT_USAGE_ERROR);
                 return;
             }
 
-            String inputPath = args[0];
-            String outputPath = args[1];
-            String signerName = args.length > 2 ? args[2] : "Elektronicky podepsano";
+            // Parse visual signature config
+            VisualConfig visualConfig = new VisualConfig();
+            visualConfig.imagePath = parsedArgs.get("image");
+            if (parsedArgs.containsKey("page")) {
+                visualConfig.page = Integer.parseInt(parsedArgs.get("page"));
+            }
+            if (parsedArgs.containsKey("x")) {
+                visualConfig.x = Float.parseFloat(parsedArgs.get("x"));
+            }
+            if (parsedArgs.containsKey("y")) {
+                visualConfig.y = Float.parseFloat(parsedArgs.get("y"));
+            }
+            if (parsedArgs.containsKey("w")) {
+                visualConfig.w = Float.parseFloat(parsedArgs.get("w"));
+            }
+            if (parsedArgs.containsKey("h")) {
+                visualConfig.h = Float.parseFloat(parsedArgs.get("h"));
+            }
 
             LOG.info("=== PAdES KMS Signer ===");
             LOG.info("Input:  {}", inputPath);
             LOG.info("Output: {}", outputPath);
             LOG.info("Signer: {}", signerName);
+            if (visualConfig.hasImage()) {
+                LOG.info("Visual signature: image={}, page={}, rect=({}, {}, {}, {})",
+                    visualConfig.imagePath, visualConfig.page,
+                    visualConfig.x, visualConfig.y, visualConfig.w, visualConfig.h);
+            } else {
+                LOG.info("Visual signature: none (invisible signature)");
+            }
 
             audit.setInputFile(inputPath);
             audit.setOutputFile(outputPath);
@@ -232,13 +334,24 @@ public class Main {
                 return;
             }
 
+            // Validate image if provided
+            if (visualConfig.hasImage()) {
+                File imageFile = new File(visualConfig.imagePath);
+                if (!imageFile.exists()) {
+                    audit.addError("PDF_ERROR: Signature image file does not exist: " + visualConfig.imagePath);
+                    audit.setSuccess(false);
+                    writeAuditAndExit(audit, EXIT_PDF_ERROR);
+                    return;
+                }
+            }
+
             // Compute input hash
             String inputHash = computeSha256(inputFile);
             audit.setDocumentSha256Before(inputHash);
             LOG.info("Input SHA-256: {}", inputHash);
 
             // Sign the document (may throw specific exceptions)
-            signDocument(inputPath, outputPath, signerName, audit);
+            signDocument(inputPath, outputPath, signerName, visualConfig, audit);
 
             // Compute output hash
             File outputFile = new File(outputPath);
@@ -336,7 +449,7 @@ public class Main {
     }
 
     private static void signDocument(String inputPath, String outputPath, String signerName,
-                                     AuditRecord audit) throws Exception {
+                                     VisualConfig visualConfig, AuditRecord audit) throws Exception {
         LOG.info("Initializing KMS signature token...");
 
         try (KmsSignatureToken token = new KmsSignatureToken(
@@ -377,6 +490,40 @@ public class Main {
             parameters.setReason("Elektronicky podepsano systemem DrBacon");
             parameters.setLocation("Czech Republic");
             parameters.setContactInfo("podpisy@drbacon.cz");
+
+            // Configure visual signature if image is provided
+            if (visualConfig.hasImage()) {
+                LOG.info("Configuring visible signature appearance...");
+
+                // Load signature image
+                byte[] imageBytes = Files.readAllBytes(new File(visualConfig.imagePath).toPath());
+                DSSDocument imageDoc = new InMemoryDocument(imageBytes);
+
+                // Create signature field parameters (position and size)
+                SignatureFieldParameters fieldParameters = new SignatureFieldParameters();
+                fieldParameters.setFieldId("Signature_" + System.currentTimeMillis());
+                fieldParameters.setPage(visualConfig.page);  // DSS uses 1-indexed pages
+                fieldParameters.setOriginX(visualConfig.x);
+                fieldParameters.setOriginY(visualConfig.y);  // From bottom in PDF coordinates
+                fieldParameters.setWidth(visualConfig.w);
+                fieldParameters.setHeight(visualConfig.h);
+
+                // Create signature image parameters
+                SignatureImageParameters imageParameters = new SignatureImageParameters();
+                imageParameters.setImage(imageDoc);
+                imageParameters.setFieldParameters(fieldParameters);
+
+                // Configure image scaling - fit within the field
+                imageParameters.setImageScaling(ImageScaling.ZOOM_AND_CENTER);
+
+                // Set the image parameters on PAdES parameters
+                parameters.setImageParameters(imageParameters);
+
+                LOG.info("VISUAL_SIG_OK: Visible signature configured at page={}, rect=({}, {}, {}, {})",
+                    visualConfig.page, visualConfig.x, visualConfig.y, visualConfig.w, visualConfig.h);
+            } else {
+                LOG.info("No signature image provided - creating invisible signature");
+            }
 
             // Create certificate verifier (allows self-signed for now)
             CommonCertificateVerifier certificateVerifier = new CommonCertificateVerifier();

@@ -1,6 +1,10 @@
 """
 PAdES digital signature module using Google Cloud KMS.
 Wraps the Java pades-kms-signer for cryptographic PDF signing.
+
+Supports visible signature with image:
+- Image is embedded in signature field appearance (AP)
+- Clicking signature in Acrobat shows signature details
 """
 import json
 import logging
@@ -11,7 +15,7 @@ import shutil
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +125,9 @@ class PAdESSigner:
         pdf_path: str,
         signer_name: str,
         output_path: Optional[str] = None,
-    ) -> tuple[str, PAdESAuditRecord]:
+        signature_image_path: Optional[str] = None,
+        placement: Optional[Dict[str, float]] = None,
+    ) -> Tuple[str, PAdESAuditRecord]:
         """
         Create PAdES digital signature on PDF using Cloud KMS.
 
@@ -129,6 +135,14 @@ class PAdESSigner:
             pdf_path: Path to input PDF file
             signer_name: Display name of signer (for certificate CN)
             output_path: Optional output path. If None, creates temp file.
+            signature_image_path: Optional path to signature PNG image.
+                If provided, creates visible signature with image as appearance.
+            placement: Optional placement dict with keys:
+                - page: Page number (1-indexed)
+                - x: X coordinate in points from left
+                - y: Y coordinate in points from BOTTOM
+                - w: Width in points
+                - h: Height in points
 
         Returns:
             Tuple of (signed_pdf_path, audit_record)
@@ -139,6 +153,9 @@ class PAdESSigner:
         if not os.path.exists(pdf_path):
             raise PAdESSigningError(f"Input PDF not found: {pdf_path}")
 
+        if signature_image_path and not os.path.exists(signature_image_path):
+            raise PAdESSigningError(f"Signature image not found: {signature_image_path}")
+
         # Create working directory
         work_dir = tempfile.mkdtemp(prefix="pades_", dir=self.temp_dir)
 
@@ -147,18 +164,35 @@ class PAdESSigner:
             input_pdf = os.path.join(work_dir, "input.pdf")
             signed_pdf = os.path.join(work_dir, "signed.pdf")
             audit_json = os.path.join(work_dir, "audit.json")
+            sig_image = os.path.join(work_dir, "signature.png") if signature_image_path else None
 
             # Copy input to work dir
             shutil.copy2(pdf_path, input_pdf)
 
-            # Build command
+            # Copy signature image if provided
+            if signature_image_path:
+                shutil.copy2(signature_image_path, sig_image)
+
+            # Build command with named arguments
             cmd = [
                 self.java_path,
                 "-jar", self.jar_path,
-                input_pdf,
-                signed_pdf,
-                signer_name,
+                "--input", input_pdf,
+                "--output", signed_pdf,
+                "--signer", signer_name,
             ]
+
+            # Add image and placement if provided
+            if sig_image and placement:
+                cmd.extend(["--image", sig_image])
+                cmd.extend(["--page", str(int(placement.get("page", 1)))])
+                cmd.extend(["--x", str(placement.get("x", 0))])
+                cmd.extend(["--y", str(placement.get("y", 0))])
+                cmd.extend(["--w", str(placement.get("w", 200))])
+                cmd.extend(["--h", str(placement.get("h", 50))])
+                logger.info(f"Visual signature: page={placement.get('page')}, "
+                           f"rect=({placement.get('x')}, {placement.get('y')}, "
+                           f"{placement.get('w')}, {placement.get('h')})")
 
             logger.info(f"Executing PAdES signer: {' '.join(cmd)}")
 

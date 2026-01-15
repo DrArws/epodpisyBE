@@ -392,11 +392,15 @@ class PDFSigner:
         use_visual_overlay: bool = True,
     ) -> Tuple[str, Optional[PAdESAuditRecord]]:
         """
-        Create PAdES digital signature on PDF with optional visual overlay.
+        Create PAdES digital signature on PDF with clickable visible signature.
 
-        This method:
-        1. Optionally adds visual signature image and stamp (PyMuPDF)
-        2. Creates cryptographic PAdES-BASELINE-T signature (Java KMS signer)
+        NEW FLOW (clickable signature in Acrobat):
+        1. Add verification stamp (doložka) to PDF (if stamp_info provided)
+        2. Save signature PNG to temp file
+        3. Java module creates signature field with PNG as appearance and signs
+
+        The signature image becomes the appearance stream (AP) of the signature widget,
+        making it clickable in Adobe Acrobat to show signature details.
 
         Args:
             pdf_path: Path to input PDF
@@ -404,7 +408,7 @@ class PDFSigner:
             placement: Signature placement coordinates
             signer_name: Name of signer
             stamp_info: Optional stamp information for verification seal
-            use_visual_overlay: If True, adds visual signature before PAdES signing
+            use_visual_overlay: If True, adds visible signature (always True for visible sig)
 
         Returns:
             Tuple of (signed_pdf_path, pades_audit_record)
@@ -412,40 +416,64 @@ class PDFSigner:
         Raises:
             SigningError: If signing fails
         """
+        import tempfile
+
+        temp_files = []
+
         try:
             logger.info(f"Starting PAdES signing for: {signer_name}")
+            logger.info(f"Placement: page={placement.page}, x={placement.x}, y={placement.y}, "
+                       f"w={placement.w}, h={placement.h}")
 
-            # Step 1: Add visual overlay if requested
-            if use_visual_overlay and signature_png_base64:
-                logger.info("Adding visual signature overlay...")
-                intermediate_path = self.sign_pdf(
+            # Step 1: Add verification stamp BEFORE cryptographic signing
+            # The stamp is a separate annotation, not part of the signature field
+            intermediate_path = pdf_path
+            if stamp_info and use_visual_overlay:
+                logger.info("Adding verification stamp (doložka) before signing...")
+                intermediate_path = self._add_stamp_only(
                     pdf_path=pdf_path,
-                    signature_png_base64=signature_png_base64,
                     placement=placement,
-                    signer_name=signer_name,
                     stamp_info=stamp_info,
                 )
-            else:
-                intermediate_path = pdf_path
+                temp_files.append(intermediate_path)
 
-            # Step 2: Apply PAdES cryptographic signature
-            logger.info("Applying PAdES cryptographic signature...")
+            # Step 2: Save signature PNG to temp file
+            signature_image_path = None
+            if signature_png_base64 and use_visual_overlay:
+                logger.info("Saving signature image for visible signature field...")
+                signature_data = self._decode_signature(signature_png_base64)
+                fd, signature_image_path = tempfile.mkstemp(suffix=".png", prefix="sig_")
+                os.close(fd)
+                with open(signature_image_path, "wb") as f:
+                    f.write(signature_data)
+                temp_files.append(signature_image_path)
+                logger.info(f"Signature image saved: {signature_image_path}")
+
+            # Step 3: Apply PAdES cryptographic signature with visible appearance
+            logger.info("Applying PAdES cryptographic signature with visible appearance...")
             pades_signer = get_pades_signer()
+
+            # Convert placement to dict for Java module
+            # Note: Java expects Y from BOTTOM (PDF standard), our placement.y is also from bottom
+            placement_dict = {
+                "page": placement.page,
+                "x": placement.x,
+                "y": placement.y,
+                "w": placement.w,
+                "h": placement.h,
+            }
 
             signed_path, audit = pades_signer.sign_pdf(
                 pdf_path=intermediate_path,
                 signer_name=signer_name,
+                signature_image_path=signature_image_path,
+                placement=placement_dict if signature_image_path else None,
             )
-
-            # Cleanup intermediate file if we created one
-            if use_visual_overlay and intermediate_path != pdf_path:
-                try:
-                    os.remove(intermediate_path)
-                except Exception as e:
-                    logger.warning(f"Failed to cleanup intermediate file: {e}")
 
             logger.info(f"PAdES signing completed: {signed_path}")
             logger.info(f"Signature profile: {audit.signature_profile if audit else 'unknown'}")
+            if signature_image_path:
+                logger.info("Visible signature field created - clickable in Acrobat")
 
             return signed_path, audit
 
@@ -455,6 +483,74 @@ class PDFSigner:
         except Exception as e:
             logger.exception("Failed to create PAdES signature")
             raise SigningError(f"Failed to create PAdES signature: {e}")
+        finally:
+            # Cleanup temp files
+            for temp_file in temp_files:
+                try:
+                    if temp_file and os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup temp file {temp_file}: {e}")
+
+    def _add_stamp_only(
+        self,
+        pdf_path: str,
+        placement: SignaturePlacement,
+        stamp_info: StampInfo,
+    ) -> str:
+        """
+        Add verification stamp (doložka) to PDF without adding signature image.
+
+        This is called BEFORE the Java module adds the cryptographic signature,
+        so the stamp becomes part of the signed content.
+
+        Args:
+            pdf_path: Path to input PDF
+            placement: Signature placement (for relative stamp positioning)
+            stamp_info: Stamp information
+
+        Returns:
+            Path to PDF with stamp added
+        """
+        import tempfile
+
+        try:
+            doc = fitz.open(pdf_path)
+            page_index = placement.page - 1
+            page = doc[page_index]
+            page_rect = page.rect
+            page_height = page_rect.height
+            page_width = page_rect.width
+
+            # Create a signature rect for stamp positioning reference
+            sig_rect = fitz.Rect(
+                placement.x,
+                page_height - placement.y - placement.h,  # Convert to top-left origin
+                placement.x + placement.w,
+                page_height - placement.y,
+            )
+
+            # Add the verification stamp
+            self._add_verification_stamp(
+                page=page,
+                stamp_info=stamp_info,
+                signature_rect=sig_rect,
+                page_height=page_height,
+                page_width=page_width,
+            )
+
+            # Save to temp file
+            fd, output_path = tempfile.mkstemp(suffix=".pdf", prefix="stamped_")
+            os.close(fd)
+            doc.save(output_path)
+            doc.close()
+
+            logger.info(f"Verification stamp added: {output_path}")
+            return output_path
+
+        except Exception as e:
+            logger.exception("Failed to add verification stamp")
+            raise SigningError(f"Failed to add verification stamp: {e}")
 
     def _add_verification_stamp(
         self,
