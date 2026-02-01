@@ -316,6 +316,11 @@ app.include_router(analysis.router, prefix="/v1/analysis", tags=["analysis"])
 app.include_router(signing.router)  # Public signing API v2
 app.include_router(internal.router) # Internal service-to-service API
 
+# NIA (Národní identitní autorita) SAML2/eIDAS identity verification
+from app.routers.nia import router as nia_router, acs_router as nia_acs_router
+app.include_router(nia_router)      # POST /v1/signing/sessions/{token}/nia/start
+app.include_router(nia_acs_router)  # POST /v1/nia/acs
+
 
 # Custom OpenAPI schema with security schemes
 def custom_openapi():

@@ -102,6 +102,12 @@ class SignerInfo:
     ip_address: Optional[str]
     user_agent: Optional[str]
     signature_placement: Optional[Dict] = None
+    # NIA identity verification fields
+    identity_method: Optional[str] = None  # "otp" or "nia"
+    identity_verified_at: Optional[datetime] = None
+    nia_loa: Optional[str] = None
+    nia_subject_masked: Optional[str] = None  # Masked SePP for report
+    nia_authn_instant: Optional[datetime] = None
 
 
 @dataclass
@@ -288,15 +294,36 @@ class EvidenceReportGenerator:
                 self.styles['BodySmall']
             ))
 
+            # Determine verification method display
+            method = signer.identity_method or "otp"
+            method_label = "NIA (SAML2/eIDAS)" if method == "nia" else "OTP"
+
             data = [
                 ["E-mail:", signer.email or "-"],
                 ["Telefon:", self._mask_phone(signer.phone) if signer.phone else "-"],
-                ["OTP kanál:", signer.otp_channel or "-"],
+                ["Metoda ověření:", method_label],
+            ]
+
+            if method == "nia":
+                # NIA-specific fields
+                data.append(["NIA ověřeno:", self._format_datetime(
+                    signer.identity_verified_at or signer.otp_verified_at
+                )])
+                data.append(["NIA LoA:", signer.nia_loa or "-"])
+                if signer.nia_subject_masked:
+                    data.append(["NIA subjekt:", signer.nia_subject_masked])
+                if signer.nia_authn_instant:
+                    data.append(["NIA AuthnInstant:", self._format_datetime(signer.nia_authn_instant)])
+            else:
+                # OTP-specific fields
+                data.append(["OTP kanál:", signer.otp_channel or "-"])
+                data.append(["OTP ověřeno:", self._format_datetime(signer.otp_verified_at)])
+
+            data.extend([
                 ["Zobrazeno:", self._format_datetime(signer.viewed_at)],
-                ["OTP ověřeno:", self._format_datetime(signer.otp_verified_at)],
                 ["Podepsáno:", self._format_datetime(signer.signed_at)],
                 ["IP adresa:", signer.ip_address or "-"],
-            ]
+            ])
 
             if signer.signature_placement:
                 placement = signer.signature_placement
@@ -412,6 +439,8 @@ class EvidenceReportGenerator:
             "OTP_SENT": "OTP odesláno",
             "OTP_OK": "OTP ověřeno",
             "OTP_FAIL": "OTP selhalo",
+            "IDENTITY_VERIFIED": "Identita ověřena",
+            "NIA_STARTED": "NIA ověření zahájeno",
             "SIGNED": "Podepsáno",
             "DECLINED": "Odmítnuto",
             "FINALIZED": "Dokončeno",
