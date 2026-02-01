@@ -87,6 +87,13 @@ class Settings(BaseSettings):
         description="Minimum seconds between OTP resend requests (default 60s)"
     )
 
+    # NIA (Národní identitní autorita) - SAML2/eIDAS
+    nia_enabled: bool = Field(default=False, alias="NIA_ENABLED")
+    nia_env: str = Field(default="test", alias="NIA_ENV")  # "test" or "prod"
+    nia_entity_id: str = Field(default="", alias="NIA_ENTITY_ID")  # SP entityID / Issuer
+    nia_acs_url: str = Field(default="", alias="NIA_ACS_URL")  # Assertion Consumer Service URL
+    # TODO: NIA_CERT_PINNING - pin NIA IdP certificate for extra security (not implemented yet)
+
     # Environment
     environment: str = Field(default="development", alias="ENVIRONMENT")
     debug: bool = Field(default=False, alias="DEBUG")
@@ -202,6 +209,19 @@ class Settings(BaseSettings):
             )
         return self.app_base_url.rstrip("/")
 
+    @property
+    def nia_saml_endpoint(self) -> str:
+        """Get NIA SAML SSO endpoint based on environment."""
+        if self.nia_env == "prod":
+            return "https://nia.identita.gov.cz/FPSTS/saml2/basic"
+        return "https://tnia.identita.gov.cz/FPSTS/saml2/basic"
+
+    @property
+    def nia_metadata_url(self) -> str:
+        """Get NIA SAML metadata URL based on environment."""
+        if self.nia_env == "prod":
+            return "https://nia.identita.gov.cz/FPSTS/FederationMetadata/2007-06/FederationMetadata.xml"
+        return "https://tnia.identita.gov.cz/FPSTS/FederationMetadata/2007-06/FederationMetadata.xml"
 
 
 

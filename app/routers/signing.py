@@ -22,6 +22,8 @@ from app.models import (
     SignerStatus,
     OTPStatus,
     OTPChannel,
+    IdentityMethod,
+    IdentityStatus,
     SignField,
     SigningSessionResponse,
     SigningErrorCode,
@@ -225,6 +227,30 @@ async def get_signing_session(
         raw_hash = doc_data.get("final_hash")
         document_checksum = f"sha256:{raw_hash}" if raw_hash else None
 
+        # Build identity verification status
+        identity_method = session_data.get("identity_method", "otp") if session_data else "otp"
+        identity_verified_at_raw = session_data.get("identity_verified_at") if session_data else None
+        identity_verified_at_dt = parse_db_timestamp(identity_verified_at_raw) if identity_verified_at_raw else None
+        nia_loa = session_data.get("nia_loa") if session_data else None
+
+        # For OTP method, use otp_verified_at as identity_verified_at
+        if identity_method == "otp" and not identity_verified_at_dt:
+            otp_vat = session_data.get("otp_verified_at") if session_data else None
+            if otp_vat:
+                identity_verified_at_dt = parse_db_timestamp(otp_vat)
+
+        identity_status = IdentityStatus(
+            method=identity_method,
+            verified=identity_verified_at_dt is not None or (identity_method == "otp" and otp_status == OTPStatus.VERIFIED),
+            verified_at=identity_verified_at_dt,
+            loa=nia_loa,
+        )
+
+        # Determine allowed identity methods
+        allowed_methods = ["otp"]
+        if settings.nia_enabled:
+            allowed_methods.append("nia")
+
         return SigningSessionResponse(
             status="valid",
             document_name=doc_data.get("name", "Dokument"),
@@ -240,6 +266,8 @@ async def get_signing_session(
             sign_fields=sign_fields,
             whatsapp_available=True,
             document_checksum=document_checksum,
+            allowed_identity_methods=allowed_methods,
+            identity_status=identity_status,
         )
 
     except AuthenticationError as e:
@@ -358,6 +386,17 @@ async def send_otp(
         session = await get_signing_session_from_token(token, request, settings)
         set_context(document_id=session.document_id, signer_id=session.signer_id)
 
+        # If identity was already verified via NIA, OTP is not needed
+        session_data_check = await supabase.get_signing_session_admin(session.token_hash)
+        if (session_data_check
+            and session_data_check.get("identity_method") == "nia"
+            and session_data_check.get("identity_verified_at")):
+            return signing_error_response(
+                409,
+                SigningErrorCode.OTP_NOT_VERIFIED,
+                "Identita již byla ověřena přes NIA. OTP není potřeba.",
+            )
+
         # DB-based rate limiting
         allowed, error_msg, retry_after = supabase.check_otp_rate_limit(session.id)
         if not allowed:
@@ -444,6 +483,17 @@ async def verify_otp(
     try:
         session = await get_signing_session_from_token(token, request, settings)
         set_context(document_id=session.document_id, signer_id=session.signer_id)
+
+        # If identity was already verified via NIA, OTP is not needed
+        session_data_check = await supabase.get_signing_session_admin(session.token_hash)
+        if (session_data_check
+            and session_data_check.get("identity_method") == "nia"
+            and session_data_check.get("identity_verified_at")):
+            return signing_error_response(
+                409,
+                SigningErrorCode.OTP_NOT_VERIFIED,
+                "Identita již byla ověřena přes NIA. OTP není potřeba.",
+            )
 
         # DB-based verify limit
         allowed, error_msg = supabase.check_otp_verify_limit(session.id)
@@ -569,19 +619,34 @@ async def complete_signature(
 
         session_data = await supabase.get_signing_session_admin(session.token_hash)
 
-        otp_required = (
-            session.verification_method != "none" and
-            (session.verification_method in ("sms", "whatsapp") or bool(session.phone))
-        )
+        # Check identity verification: NIA or OTP
+        identity_method = session_data.get("identity_method", "otp") if session_data else "otp"
+        identity_verified = False
 
-        if otp_required and not session_data.get("otp_verified_at"):
-            return signing_error_response(403, SigningErrorCode.OTP_NOT_VERIFIED, "Ověření vypršelo. Prosím ověřte se znovu pomocí kódu.")
+        if identity_method == "nia":
+            # NIA: check identity_verified_at
+            if session_data.get("identity_verified_at"):
+                identity_verified = True
+            else:
+                return signing_error_response(403, SigningErrorCode.OTP_NOT_VERIFIED, "Identita nebyla ověřena. Dokončete prosím ověření přes NIA.")
+        else:
+            # OTP: existing logic
+            otp_required = (
+                session.verification_method != "none" and
+                (session.verification_method in ("sms", "whatsapp") or bool(session.phone))
+            )
 
-        if otp_required and session_data.get("otp_verified_at"):
-            otp_verified_at = session_data.get("otp_verified_at")
-            if is_expired(otp_verified_at, settings.otp_ttl_seconds):
-                logger.info(f"OTP verification expired for session_fp={session_fp}")
+            if otp_required and not session_data.get("otp_verified_at"):
                 return signing_error_response(403, SigningErrorCode.OTP_NOT_VERIFIED, "Ověření vypršelo. Prosím ověřte se znovu pomocí kódu.")
+
+            if otp_required and session_data.get("otp_verified_at"):
+                otp_verified_at = session_data.get("otp_verified_at")
+                if is_expired(otp_verified_at, settings.otp_ttl_seconds):
+                    logger.info(f"OTP verification expired for session_fp={session_fp}")
+                    return signing_error_response(403, SigningErrorCode.OTP_NOT_VERIFIED, "Ověření vypršelo. Prosím ověřte se znovu pomocí kódu.")
+                identity_verified = True
+            elif not otp_required:
+                identity_verified = True
 
         acquired, cached_response, reason = await supabase.try_acquire_signing_lock_admin(
             session_id=str(session.id),

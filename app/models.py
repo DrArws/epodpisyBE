@@ -24,6 +24,12 @@ class VerificationMethod(str, Enum):
     EMAIL = "email"    # Email verification (future)
 
 
+class IdentityMethod(str, Enum):
+    """Identity verification method used in signing session."""
+    OTP = "otp"   # OTP via SMS/WhatsApp (default)
+    NIA = "nia"   # NIA (Národní identitní autorita) SAML2/eIDAS
+
+
 class SignerStatus(str, Enum):
     PENDING = "pending"
     VIEWED = "viewed"
@@ -535,6 +541,11 @@ class SigningSession(BaseModel):
     viewed_at: Optional[datetime] = None
     ip_address: Optional[str] = None
     user_agent: Optional[str] = None
+    # NIA identity verification
+    identity_method: str = "otp"  # "otp" or "nia"
+    identity_verified_at: Optional[datetime] = None
+    nia_subject: Optional[str] = None
+    nia_loa: Optional[str] = None
 
 
 class Document(BaseModel):
@@ -587,6 +598,14 @@ class OTPStatus(str, Enum):
     SENT = "sent"                  # OTP sent, waiting for verification
     VERIFIED = "verified"          # OTP verified successfully
     LOCKED = "locked"              # Too many failed attempts, temporarily locked
+
+
+class IdentityStatus(BaseModel):
+    """Identity verification status for signing session."""
+    method: str = Field(..., description="Identity method: otp | nia")
+    verified: bool = Field(default=False, description="Whether identity is verified")
+    verified_at: Optional[datetime] = Field(None, description="When verified")
+    loa: Optional[str] = Field(None, description="Level of Assurance (NIA only)")
 
 
 class SignerHint(BaseModel):
@@ -690,6 +709,9 @@ class SigningSessionResponse(BaseModel):
     sign_fields: List[SignField] = Field(default_factory=list, description="Signature fields")
     whatsapp_available: bool = Field(default=True, description="WhatsApp OTP available")
     document_checksum: Optional[str] = Field(None, description="SHA-256 of document")
+    # Identity verification info
+    allowed_identity_methods: List[str] = Field(default_factory=lambda: ["otp"], description="Available identity methods: otp, nia")
+    identity_status: Optional[IdentityStatus] = Field(None, description="Current identity verification status")
     # For status="completed" - signed document info
     signed_pdf_url: Optional[str] = Field(None, description="URL to download signed PDF")
     signed_at: Optional[datetime] = Field(None, description="When document was signed")
@@ -824,6 +846,22 @@ class SignCompleteResponse(BaseModel):
     signed_pdf_url: Optional[str] = None
     signed_at: datetime
     message: Optional[str] = None
+
+
+class NiaStartResponse(BaseModel):
+    """POST /v1/signing/sessions/{token}/nia/start response."""
+    redirect_url: str = Field(..., description="NIA SAML SSO redirect URL")
+    state: str = Field(..., description="Opaque state for CSRF protection (for FE reference)")
+
+
+class NiaErrorCode(str, Enum):
+    """Error codes for NIA flow."""
+    NIA_DISABLED = "NIA_DISABLED"
+    NIA_STATE_INVALID = "NIA_STATE_INVALID"
+    NIA_RESPONSE_INVALID = "NIA_RESPONSE_INVALID"
+    NIA_SESSION_NOT_FOUND = "NIA_SESSION_NOT_FOUND"
+    NIA_ALREADY_VERIFIED = "NIA_ALREADY_VERIFIED"
+    NIA_REPLAY_DETECTED = "NIA_REPLAY_DETECTED"
 
 
 class SignedStatusResponse(BaseModel):
